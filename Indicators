@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NSE Indicators — Cross Radar</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+:root{
+  --bg:#f0ede6; --ink:#1a2744; --gold:#e8b94a; --goldD:#9a6f10;
+  --bull:#2d7a4f; --bear:#b0413e; --muted:#66708a; --faint:#9aa2b5;
+  --card:#ffffff; --edge:#ddd6c8; --navy:#1a2744;
+  --mono:'Courier New',ui-monospace,monospace;
+}
+body{ background:var(--bg); color:var(--ink); font-family:Arial,sans-serif; font-size:13px; min-height:100vh; }
+
+/* ── header ── */
+.u-header{ background:var(--navy); color:#f0ede6; display:flex; align-items:center; gap:22px; padding:0 20px; height:52px; position:sticky; top:0; z-index:50; }
+.u-brand{ font-family:var(--mono); font-weight:700; font-size:17px; letter-spacing:1px; color:#f0ede6; text-decoration:none; }
+.u-brand span{ color:var(--gold); }
+.u-sub{ font-size:11px; color:#8fa1c2; letter-spacing:1.5px; text-transform:uppercase; }
+.u-right{ margin-left:auto; display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:12px; }
+.live-dot{ width:8px; height:8px; border-radius:50%; background:#5ee08a; box-shadow:0 0 8px #5ee08a; }
+
+/* ── tabs ── */
+.tabs{ display:flex; gap:4px; padding:12px 20px 0; max-width:1280px; margin:0 auto; }
+.tab{ padding:9px 18px; border:1px solid var(--edge); border-bottom:none; border-radius:9px 9px 0 0; background:#e7e2d6; cursor:pointer; font-weight:600; font-size:12.5px; color:var(--muted); }
+.tab.on{ background:var(--card); color:var(--ink); }
+.wrap{ max-width:1280px; margin:0 auto; padding:0 20px 40px; }
+.panel{ background:var(--card); border:1px solid var(--edge); border-radius:0 12px 12px 12px; padding:18px; display:none; }
+.panel.on{ display:block; }
+
+.status{ font-family:var(--mono); font-size:11px; color:var(--muted); margin:0 0 12px; min-height:14px; }
+.status.err{ color:var(--bear); }
+.badge{ font-family:var(--mono); font-size:10px; padding:2px 8px; border-radius:999px; border:1px solid var(--edge); }
+.badge.live{ color:var(--bull); border-color:#bcd9c8; background:#eef7f1; }
+.badge.stale{ color:var(--goldD); border-color:#e6d9b0; background:#faf4e2; }
+.badge.unavail{ color:var(--bear); border-color:#e3c2c0; background:#faeeed; }
+
+/* ── portfolio controls ── */
+.pfbar{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+select,input[type=text]{ border:1px solid var(--edge); border-radius:8px; padding:7px 10px; font-size:12.5px; background:#fff; color:var(--ink); font-family:inherit; }
+button{ border:1px solid var(--edge); border-radius:8px; padding:7px 14px; font-size:12px; font-weight:600; background:#fff; color:var(--ink); cursor:pointer; }
+button:hover{ border-color:var(--gold); }
+button.primary{ background:var(--navy); color:#fff; border-color:var(--navy); }
+button.danger{ color:var(--bear); }
+.typeahead{ position:relative; }
+.ta-list{ position:absolute; top:36px; left:0; width:340px; max-height:280px; overflow:auto; background:#fff; border:1px solid var(--edge); border-radius:9px; box-shadow:0 14px 40px -18px rgba(0,0,0,.35); z-index:40; display:none; }
+.ta-item{ padding:8px 12px; cursor:pointer; display:flex; gap:8px; align-items:baseline; }
+.ta-item:hover{ background:#f5f1e7; }
+.ta-item b{ font-family:var(--mono); font-size:12px; }
+.ta-item .nm{ color:var(--muted); font-size:11.5px; flex:1; }
+.ta-item .sc{ color:var(--faint); font-size:10px; }
+.chips{ display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 14px; }
+.pchip{ font-family:var(--mono); font-size:11px; padding:4px 8px; border-radius:7px; background:#f5f1e7; border:1px solid var(--edge); display:inline-flex; gap:7px; align-items:center; }
+.pchip i{ cursor:pointer; color:var(--bear); font-style:normal; font-weight:700; }
+
+/* ── matrix table ── */
+table{ width:100%; border-collapse:collapse; font-size:12px; }
+th{ text-align:left; font-size:10px; letter-spacing:1px; text-transform:uppercase; color:var(--faint); padding:7px 8px; border-bottom:2px solid var(--edge); white-space:nowrap; }
+td{ padding:8px; border-bottom:1px solid #eee8da; white-space:nowrap; vertical-align:middle; }
+tr.row:hover{ background:#faf7ef; cursor:pointer; }
+.sym{ font-family:var(--mono); font-weight:700; }
+.mut{ color:var(--muted); font-size:11px; }
+.up{ color:var(--bull); font-weight:600; } .dn{ color:var(--bear); font-weight:600; } .gd{ color:var(--goldD); font-weight:600; }
+.hz{ font-family:var(--mono); font-size:9.5px; padding:1px 6px; border-radius:6px; background:#faeeed; color:var(--bear); border:1px solid #e3c2c0; margin-right:3px; }
+.grade{ font-family:var(--mono); font-weight:700; padding:2px 9px; border-radius:7px; }
+.grade.A{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
+.grade.B{ background:#faf4e2; color:var(--goldD); border:1px solid #e6d9b0; }
+.grade.C{ background:#f2f2f2; color:#888; border:1px solid #ddd; }
+.band{ font-family:var(--mono); font-size:10px; padding:1px 7px; border-radius:6px; }
+.band.HOT{ background:#faeeed; color:var(--bear); border:1px solid #e3c2c0; }
+.band.HOT.g{ background:#faf4e2; color:var(--goldD); border-color:#e6d9b0; }
+.band.WATCH{ background:#eef1f7; color:#40507a; border:1px solid #c6cede; }
+
+/* ── deep dive ── */
+.dive{ display:none; margin-top:16px; border:1px solid var(--edge); border-radius:12px; padding:16px; background:linear-gradient(180deg,#1b2b4a,#16233f); color:#eef0ea; }
+.dive .hd{ display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; align-items:flex-start; }
+.dive .tick{ font-family:var(--mono); font-size:22px; font-weight:700; }
+.dive .tick b{ color:var(--gold); }
+.dive .nm{ color:#8fa1c2; font-size:12px; margin-top:3px; }
+.dive .px{ font-family:var(--mono); font-size:20px; font-weight:700; text-align:right; }
+.dive .pxsub{ font-size:10px; color:#8fa1c2; font-family:var(--mono); text-align:right; margin-top:2px; }
+.dive .mchips{ display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+.dive .mc{ font-family:var(--mono); font-size:11px; padding:4px 9px; border-radius:7px; background:#0d1830; border:1px solid #26374f; color:#8fa1c2; }
+.dive .mc b{ color:#eef0ea; }
+.dive .mc .up{ color:#5ee08a; } .dive .mc .dn{ color:#f0655a; } .dive .mc .gd{ color:var(--gold); }
+.dive .chartbox{ margin-top:14px; background:#0c1730; border:1px solid #26374f; border-radius:10px; padding:10px 10px 4px; }
+.dive .ct{ font-size:10px; letter-spacing:1.6px; text-transform:uppercase; color:#63769a; margin:0 2px 6px; display:flex; justify-content:space-between; flex-wrap:wrap; }
+.dive svg{ display:block; width:100%; height:auto; }
+.dive .hzline{ margin-top:12px; font-size:11px; color:#f0b3ad; }
+.dive .verdict{ margin-top:12px; background:#0d1830; border:1px solid #26374f; border-radius:9px; padding:10px 13px; font-size:12px; }
+.dive .verdict b{ font-family:var(--mono); }
+.dive .close{ float:right; background:none; border:1px solid #26374f; color:#8fa1c2; }
+
+/* ── radar filters ── */
+.filters{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+.boards{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.board h3{ font-size:12px; letter-spacing:1.5px; text-transform:uppercase; padding:8px 4px; }
+.board.golden h3{ color:var(--goldD); }
+.board.death h3{ color:var(--bear); }
+.showing{ font-size:10.5px; color:var(--faint); margin:6px 4px; }
+@media (max-width:900px){ .boards{ grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<header class="u-header">
+  <a href="indicators.html" class="u-brand">NSE <span>Indicators</span></a>
+  <span class="u-sub">Pre-cross radar · confirm on close</span>
+  <div class="u-right"><div class="live-dot"></div><span id="uClock">–</span><span style="color:#8fa1c2">IST</span></div>
+</header>
+
+<div class="tabs">
+  <div class="tab on" data-tab="pf">📁 Portfolio</div>
+  <div class="tab" data-tab="radar">📡 Cross Radar</div>
+</div>
+
+<div class="wrap">
+
+  <!-- ═══════════ PORTFOLIO ═══════════ -->
+  <div class="panel on" id="panel-pf">
+    <div class="status" id="pfStatus"></div>
+    <div class="pfbar">
+      <select id="pfSelect"><option value="">— portfolios —</option></select>
+      <input type="text" id="pfNewName" placeholder="new portfolio name" style="width:170px">
+      <button onclick="pfCreate()">+ Create</button>
+      <button class="danger" onclick="pfDelete()">Delete</button>
+      <span style="flex:1"></span>
+      <div class="typeahead">
+        <input type="text" id="taInput" placeholder="add stock — type name or symbol" style="width:300px" autocomplete="off">
+        <div class="ta-list" id="taList"></div>
+      </div>
+      <button class="primary" onclick="pfSaveAndLoad()">Save & Analyse</button>
+    </div>
+    <div class="chips" id="pfChips"></div>
+    <div style="overflow:auto">
+      <table id="mtx" style="display:none">
+        <thead><tr>
+          <th>Stock</th><th>Price</th><th>Stack</th><th>50/200</th>
+          <th>Pre-cross</th><th>Grade</th><th>ADX</th><th>RSI</th>
+          <th>MACD</th><th>ST</th><th>SAR</th><th>RVOL</th><th>OBV</th><th>Hazards</th>
+        </tr></thead>
+        <tbody id="mtxBody"></tbody>
+      </table>
+    </div>
+    <div class="dive" id="dive"></div>
+  </div>
+
+  <!-- ═══════════ RADAR ═══════════ -->
+  <div class="panel" id="panel-radar">
+    <div class="status" id="rdStatus"></div>
+    <div class="filters">
+      <span id="rdBadge" class="badge">–</span>
+      <select id="fBand"><option value="">band: all</option><option value="HOT">🔥 HOT ≤15d</option><option value="WATCH">👁 WATCH ≤30d</option></select>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" id="fAdx"> ADX ≥ 25 only</label>
+      <select id="fSector"><option value="">sector: all</option></select>
+      <select id="fGrade"><option value="">grade: all</option><option>A</option><option>B</option><option>C</option></select>
+      <button onclick="renderRadar()">Apply</button>
+    </div>
+    <div class="boards">
+      <div class="board golden">
+        <h3>▲ Approaching Golden Cross</h3>
+        <div style="overflow:auto"><table><thead><tr>
+          <th>Stock</th><th>ETA</th><th>Grade</th><th>Gap%</th><th>ADX</th><th>RSI</th><th>MACD</th><th>RVOL</th><th>Hz</th>
+        </tr></thead><tbody id="goldBody"></tbody></table></div>
+        <div class="showing" id="goldShow"></div>
+      </div>
+      <div class="board death">
+        <h3>▼ Approaching Death Cross</h3>
+        <div style="overflow:auto"><table><thead><tr>
+          <th>Stock</th><th>ETA</th><th>Grade</th><th>Gap%</th><th>ADX</th><th>RSI</th><th>MACD</th><th>RVOL</th><th>Hz</th>
+        </tr></thead><tbody id="deathBody"></tbody></table></div>
+        <div class="showing" id="deathShow"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ══════════════ CONFIG — set your /exec URL ══════════════ */
+var API = 'PASTE_YOUR_EXEC_URL_HERE';
+
+/* ══════════════ helpers ══════════════ */
+function $(id){ return document.getElementById(id); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+function inr(n){ return n==null?'—':'₹'+Number(n).toLocaleString('en-IN',{maximumFractionDigits:1}); }
+function J(url){ return fetch(url).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }); }
+setInterval(function(){ $('uClock').textContent=new Date().toLocaleTimeString('en-IN',{hour12:false,timeZone:'Asia/Kolkata'}); },1000);
+
+/* tabs */
+document.querySelectorAll('.tab').forEach(function(t){
+  t.addEventListener('click',function(){
+    document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('on');});
+    document.querySelectorAll('.panel').forEach(function(x){x.classList.remove('on');});
+    t.classList.add('on'); $('panel-'+t.dataset.tab).classList.add('on');
+    if(t.dataset.tab==='radar' && !radarLoaded) loadRadar();
+  });
+});
+
+/* ══════════════ universe + typeahead ══════════════ */
+var UNI = [], UNIMAP = {};
+function loadUniverse(){
+  return J(API+'?action=universe').then(function(r){
+    UNI = r.universe||[];
+    UNI.forEach(function(u){ UNIMAP[u.sym]=u; });
+    var secs = Array.from(new Set(UNI.map(function(u){return u.sector;}))).sort();
+    secs.forEach(function(s){ var o=document.createElement('option'); o.textContent=s; $('fSector').appendChild(o); });
+  });
+}
+$('taInput').addEventListener('input',function(){
+  var q=this.value.trim().toUpperCase(), box=$('taList');
+  if(q.length<2){ box.style.display='none'; return; }
+  var hits=UNI.filter(function(u){ return u.sym.indexOf(q)===0 || u.name.toUpperCase().indexOf(q)>=0; }).slice(0,12);
+  box.innerHTML = hits.map(function(u){
+    return '<div class="ta-item" data-sym="'+esc(u.sym)+'"><b>'+esc(u.sym)+'</b><span class="nm">'+esc(u.name)+'</span><span class="sc">'+esc(u.sector)+'</span></div>';
+  }).join('') || '<div class="ta-item mut">no match</div>';
+  box.style.display='block';
+});
+$('taList').addEventListener('click',function(e){
+  var it=e.target.closest('.ta-item'); if(!it||!it.dataset.sym) return;
+  addSym(it.dataset.sym); $('taInput').value=''; $('taList').style.display='none';
+});
+document.addEventListener('click',function(e){ if(!e.target.closest('.typeahead')) $('taList').style.display='none'; });
+
+/* ══════════════ portfolio state ══════════════ */
+var pfName=null, pfSyms=[], PF={};
+function pfStatus(msg,err){ $('pfStatus').textContent=msg; $('pfStatus').className='status'+(err?' err':''); }
+
+function loadPortfolios(){
+  return J(API+'?action=pf&sub=list').then(function(r){
+    PF={}; var sel=$('pfSelect');
+    sel.innerHTML='<option value="">— portfolios —</option>';
+    (r.portfolios||[]).forEach(function(p){
+      PF[p.name]=p.symbols;
+      var o=document.createElement('option'); o.value=p.name; o.textContent=p.name+' ('+p.symbols.length+')'; sel.appendChild(o);
+    });
+  });
+}
+$('pfSelect').addEventListener('change',function(){
+  pfName=this.value||null; pfSyms=pfName?(PF[pfName]||[]).slice():[];
+  drawChips(); $('mtx').style.display='none'; $('dive').style.display='none';
+  if(pfSyms.length) loadMatrix();
+});
+function pfCreate(){
+  var n=$('pfNewName').value.trim(); if(!n){ pfStatus('give the new portfolio a name',true); return; }
+  pfName=n; pfSyms=[]; $('pfNewName').value=''; drawChips();
+  pfStatus('“'+n+'” started — add stocks, then Save & Analyse');
+}
+function pfDelete(){
+  if(!pfName){ pfStatus('pick a portfolio first',true); return; }
+  if(!confirm('Delete portfolio "'+pfName+'"?')) return;
+  J(API+'?action=pf&sub=del&name='+encodeURIComponent(pfName)).then(function(){
+    pfName=null; pfSyms=[]; drawChips(); $('mtx').style.display='none';
+    loadPortfolios(); pfStatus('deleted');
+  });
+}
+function addSym(s){
+  if(!pfName){ pfName='My Watchlist'; }
+  if(pfSyms.indexOf(s)<0) pfSyms.push(s);
+  drawChips();
+}
+function rmSym(s){ pfSyms=pfSyms.filter(function(x){return x!==s;}); drawChips(); }
+function drawChips(){
+  $('pfChips').innerHTML =
+    (pfName?'<span class="pchip" style="background:#1a2744;color:#fff">📁 '+esc(pfName)+'</span>':'')
+    + pfSyms.map(function(s){ return '<span class="pchip"><b>'+esc(s)+'</b><i onclick="rmSym(\''+esc(s)+'\')">✕</i></span>'; }).join('');
+}
+function pfSaveAndLoad(){
+  if(!pfName||!pfSyms.length){ pfStatus('create a portfolio and add at least one stock',true); return; }
+  pfStatus('saving…');
+  J(API+'?action=pf&sub=save&name='+encodeURIComponent(pfName)+'&syms='+encodeURIComponent(pfSyms.join(',')))
+    .then(function(){ return loadPortfolios(); })
+    .then(function(){ $('pfSelect').value=pfName; loadMatrix(); });
+}
+
+/* ══════════════ matrix ══════════════ */
+function preCell(pc){
+  if(!pc||pc.heading==='na') return '<span class="mut">—</span>';
+  if(pc.heading==='none') return '<span class="mut">not converging</span>';
+  var g=pc.heading==='golden';
+  var bandCls = pc.band==='HOT'?('band HOT'+(g?' g':'')):pc.band==='WATCH'?'band WATCH':'band';
+  return '<span class="'+(g?'gd':'dn')+'">'+(g?'▲ golden':'▼ death')+'</span> '
+       + (pc.etaDays!=null?'<span class="'+bandCls+'">≈'+pc.etaDays+'d '+(pc.band!=='far'?pc.band:'')+'</span>':'');
+}
+function crossCell(c){
+  if(!c||!c.crossed) return '<span class="mut">none</span>';
+  return '<span class="'+(c.direction==='bullish'?'up':'dn')+'">'+(c.direction==='bullish'?'golden':'death')+'</span> <span class="mut">'+c.barsAgo+'d</span>'+(c.fresh?' <span class="gd">●</span>':'');
+}
+function loadMatrix(){
+  pfStatus('fetching '+pfSyms.length+' stocks…');
+  J(API+'?action=ind&syms='+encodeURIComponent(pfSyms.join(','))).then(function(r){
+    var rows=r.rows||[];
+    $('mtxBody').innerHTML = rows.map(function(x){
+      if(!x.ok) return '<tr><td class="sym">'+esc(x.sym)+'</td><td colspan="13" class="mut">unavailable — '+esc(x.error)+'</td></tr>';
+      return '<tr class="row" data-sym="'+esc(x.sym)+'">'
+        +'<td><span class="sym">'+esc(x.sym)+'</span><br><span class="mut">'+esc(x.sector||'')+'</span></td>'
+        +'<td>'+inr(x.price)+(x.intraday&&x.livePrice!=null?'<br><span class="mut">live '+inr(x.livePrice)+'</span>':'')+'</td>'
+        +'<td class="'+(x.stack==='bull'?'up':x.stack==='bear'?'dn':'mut')+'">'+esc(x.stack)+'</td>'
+        +'<td>'+crossCell(x.crossEma)+'</td>'
+        +'<td>'+preCell(x.precross)+'</td>'
+        +'<td>'+(x.grade?'<span class="grade '+x.grade+'">'+x.grade+'</span>':'<span class="mut">—</span>')+'</td>'
+        +'<td>'+(x.adx!=null?x.adx:'—')+' <span class="mut">'+esc(x.adxRegime)+'</span></td>'
+        +'<td>'+(x.rsi!=null?x.rsi:'—')+' <span class="mut">'+esc(x.rsiZone)+'</span>'+(x.divergence?' <span class="dn">▼div</span>':'')+'</td>'
+        +'<td class="'+(x.macdAboveZero?'up':'dn')+'">'+(x.macdHist!=null?x.macdHist:'—')+(x.macdExpanding?' <span class="gd">▲▲</span>':'')+'</td>'
+        +'<td class="'+(x.supertrend==='buy'?'up':x.supertrend==='sell'?'dn':'mut')+'">'+esc(x.supertrend)+'</td>'
+        +'<td class="mut">'+esc(x.psar)+'</td>'
+        +'<td>'+(x.rvol!=null?x.rvol:'—')+'</td>'
+        +'<td class="'+(x.obvTrend==='rising'?'up':x.obvTrend==='falling'?'dn':'mut')+'">'+esc(x.obvTrend)+'</td>'
+        +'<td>'+(x.hazards||[]).map(function(h){return '<span class="hz">'+esc(h)+'</span>';}).join('')+'</td>'
+        +'</tr>';
+    }).join('');
+    $('mtx').style.display='table';
+    pfStatus('loaded '+rows.length+' · click a row for the deep dive · indicators on completed bars');
+  }).catch(function(e){ pfStatus('✗ '+e.message,true); });
+}
+$('mtxBody').addEventListener('click',function(e){
+  var tr=e.target.closest('tr.row'); if(tr) openDive(tr.dataset.sym);
+});
+
+/* ══════════════ deep dive with projection ══════════════ */
+function openDive(sym){
+  var d=$('dive'); d.style.display='block';
+  d.innerHTML='<div class="mut" style="color:#8fa1c2;font-family:var(--mono)">loading '+esc(sym)+' …</div>';
+  d.scrollIntoView({behavior:'smooth',block:'nearest'});
+  J(API+'?action=ind&sym='+encodeURIComponent(sym)).then(function(p){
+    if(!p.ok){ d.innerHTML='<div style="color:#f0655a">'+esc(p.error)+'</div>'; return; }
+    var pc=p.precross, g=pc.heading==='golden', appr=(pc.heading==='golden'||pc.heading==='death');
+    var mc='';
+    function chip(h){ mc+='<span class="mc">'+h+'</span>'; }
+    chip('ADX <b>'+p.adx.value+'</b> '+esc(p.adx.regime));
+    chip('RSI <b>'+p.rsiValue+'</b> '+esc(p.rsiZoneV)+(p.rsiDivergence?' <span class="dn">▼div</span>':''));
+    chip('MACD hist <b class="'+(p.macd.histDir==='bull'?'up':'dn')+'">'+p.macd.hist+'</b>'+(p.macd.histExpanding?' <span class="gd">expanding</span>':''));
+    chip('RMI <b>'+p.rmi+'</b>');
+    chip('Stoch <b>'+p.stoch.k+'</b>'+(p.stochApplicable?'':' <span class="dn">(trend — ignore)</span>'));
+    chip('ST <b class="'+(p.supertrendV.state==='buy'?'up':'dn')+'">'+esc(p.supertrendV.state)+'</b>'+(p.trendToolsApplicable?'':' <span class="dn">unreliable</span>'));
+    chip('SAR <b>'+esc(p.psar)+'</b>');
+    chip('RVOL <b>'+p.rvol+'</b>');
+    chip('OBV <b class="'+(p.obvTrend==='rising'?'up':p.obvTrend==='falling'?'dn':'')+'">'+esc(p.obvTrend)+'</b>');
+    chip('SMA 50/200: '+(p.crossSma.crossed?(p.crossSma.direction==='bullish'?'<b class="up">golden</b>':'<b class="dn">death</b>')+' '+p.crossSma.barsAgo+'d':'<b>no cross</b>'));
+
+    var verdict = appr
+      ? '<b>'+(g?'▲ APPROACHING GOLDEN':'▼ APPROACHING DEATH')+' CROSS</b> — gap '+pc.gapPct+'% closing at '+pc.velPctPerDay+'%/day → <b>≈'+pc.etaDays+' sessions</b> ('+pc.band+') if convergence holds. Setup grade <b>'+(p.grade||'—')+'</b>.'
+      : (p.crossEma.crossed?'<b>Last 50/200 cross: '+(p.crossEma.direction==='bullish'?'GOLDEN':'DEATH')+'</b> '+p.crossEma.barsAgo+' sessions ago — lines now '+(pc.gapPct>0?'diverging above':'diverging below')+'.':'No cross state available.');
+
+    d.innerHTML =
+      '<button class="close" onclick="$(\'dive\').style.display=\'none\'">✕ close</button>'
+      +'<div class="hd"><div><div class="tick"><b>'+esc(p.sym)+'</b></div><div class="nm">'+esc(p.name||'')+' · '+esc(p.sector||'')+'</div></div>'
+      +'<div><div class="px">'+inr(p.intraday&&p.livePrice!=null?p.livePrice:p.price)+'</div>'
+      +'<div class="pxsub">'+(p.intraday?'live · signals as of yesterday’s close':'as of close')+' · '+p.bars+' bars · '+(p.adjusted?'adjusted':'⚠ raw')+'</div></div></div>'
+      +'<div class="mchips">'+mc+'</div>'
+      +'<div class="chartbox"><div class="ct"><span>Close · EMA 50 / 200 · projected intersection</span>'
+      +'<span style="letter-spacing:0;text-transform:none;font-family:var(--mono)"><span style="color:#5ee08a">■ close</span> <span style="color:#e8b94a">■ 50</span> <span style="color:#c98be0">■ 200</span> <span style="color:#8fa1c2">┄ projection</span></span></div>'
+      +'<svg id="diveSvg" viewBox="0 0 900 300" preserveAspectRatio="none" style="height:300px"></svg></div>'
+      +(p.hazards.length?'<div class="hzline">⚠ '+p.hazards.map(function(h){return esc(h.msg);}).join(' · ')+'</div>':'')
+      +'<div class="verdict">'+verdict+'</div>';
+
+    drawDive(p);
+  }).catch(function(e){ d.innerHTML='<div style="color:#f0655a">✗ '+esc(e.message)+'</div>'; });
+}
+
+function drawDive(p){
+  var S=p.series, cl=S.close, e50=S.ema50, e200=S.ema200, n=cl.length;
+  var pc=p.precross, appr=(pc.heading==='golden'||pc.heading==='death');
+  var proj = appr && pc.etaDays!=null ? Math.min(pc.etaDays+6, 70) : 0;   // future bars drawn
+  var W=900, H=300, PL=6, PR=56, PT=12, PB=8, total=n+proj;
+
+  /* slopes for projection: last-10 linear */
+  function slopeOf(a){ var w=a.slice(-10).filter(function(v){return v!=null;}); if(w.length<3) return 0;
+    var s=0,sx=0,sy=0,sxy=0,sxx=0,m=w.length; for(var i=0;i<m;i++){sx+=i;sy+=w[i];sxy+=i*w[i];sxx+=i*i;}
+    var dd=m*sxx-sx*sx; return dd===0?0:(m*sxy-sx*sy)/dd; }
+  var s50=slopeOf(e50), s200=slopeOf(e200);
+  var p50=[], p200=[];
+  for(var k=1;k<=proj;k++){ p50.push(e50[n-1]+s50*k); p200.push(e200[n-1]+s200*k); }
+
+  var all=cl.concat(e50,e200,p50,p200).filter(function(v){return v!=null;});
+  var lo=Math.min.apply(null,all), hi=Math.max.apply(null,all), pad=(hi-lo)*0.07; lo-=pad; hi+=pad;
+  function X(i){ return PL+i/(total-1)*(W-PL-PR); }
+  function Y(v){ return PT+(1-(v-lo)/(hi-lo))*(H-PT-PB); }
+  function path(a,off){ var d=''; for(var i=0;i<a.length;i++){ if(a[i]==null)continue; d+=(d?'L':'M')+X(i+(off||0)).toFixed(1)+' '+Y(a[i]).toFixed(1)+' '; } return d.trim(); }
+
+  var s='';
+  [0.25,0.5,0.75].forEach(function(f){ var y=(PT+f*(H-PT-PB)).toFixed(0);
+    s+='<line x1="'+PL+'" x2="'+(W-PR)+'" y1="'+y+'" y2="'+y+'" stroke="#213150" stroke-width="1"/>'; });
+
+  /* today divider */
+  s+='<line x1="'+X(n-1).toFixed(1)+'" x2="'+X(n-1).toFixed(1)+'" y1="'+PT+'" y2="'+(H-PB)+'" stroke="#ffffff33" stroke-width="1" stroke-dasharray="2 3"/>'
+   +'<text x="'+X(n-1).toFixed(1)+'" y="'+(PT+10)+'" text-anchor="middle" fill="#63769a" font-family="Courier New" font-size="9">today</text>';
+
+  s+='<path d="'+path(e200)+'" fill="none" stroke="#c98be0" stroke-width="2"/>'
+   + '<path d="'+path(e50)+'" fill="none" stroke="#e8b94a" stroke-width="2"/>'
+   + '<path d="'+path(cl)+'" fill="none" stroke="#5ee08a" stroke-width="1.3" opacity=".85"/>';
+
+  if(proj){
+    s+='<path d="'+path(p200,n)+'" fill="none" stroke="#c98be0" stroke-width="1.6" stroke-dasharray="4 4" opacity=".7"/>'
+     + '<path d="'+path(p50,n)+'" fill="none" stroke="#e8b94a" stroke-width="1.6" stroke-dasharray="4 4" opacity=".7"/>';
+    /* intersection of the two projected lines */
+    var dv=s50-s200, gap0=e200[n-1]-e50[n-1];
+    if(Math.abs(dv)>1e-9){
+      var tX=gap0/dv;
+      if(tX>0 && tX<=proj){
+        var ix=X(n-1+tX), iy=Y(e50[n-1]+s50*tX);
+        var col = pc.heading==='golden' ? '#e8b94a' : '#f0655a';
+        s+='<circle cx="'+ix.toFixed(1)+'" cy="'+iy.toFixed(1)+'" r="6" fill="none" stroke="'+col+'" stroke-width="2"/>'
+         + '<circle cx="'+ix.toFixed(1)+'" cy="'+iy.toFixed(1)+'" r="2.4" fill="'+col+'"/>'
+         + '<text x="'+ix.toFixed(1)+'" y="'+(iy-12).toFixed(1)+'" text-anchor="middle" fill="'+col+'" font-family="Courier New" font-size="10">'
+         + (pc.heading==='golden'?'golden':'death')+' ≈'+pc.etaDays+'d</text>';
+      }
+    }
+  }
+  /* right-edge value dots */
+  [[cl[n-1],'#5ee08a'],[e50[n-1],'#e8b94a'],[e200[n-1],'#c98be0']].forEach(function(q){
+    if(q[0]==null)return; s+='<circle cx="'+(W-PR+8)+'" cy="'+Y(q[0]).toFixed(1)+'" r="3.2" fill="'+q[1]+'"/>';
+  });
+  $('diveSvg').innerHTML=s;
+}
+
+/* ══════════════ radar ══════════════ */
+var radarLoaded=false, RD=[];
+function loadRadar(){
+  $('rdStatus').textContent='loading universe scan…';
+  J(API+'?action=radar').then(function(r){
+    if(!r.ok){
+      $('rdBadge').className='badge unavail'; $('rdBadge').textContent='UNAVAILABLE';
+      $('rdStatus').textContent=r.error||'no scan'; $('rdStatus').className='status err'; return;
+    }
+    RD=r.rows.filter(function(x){return x.ok;});
+    radarLoaded=true;
+    var sc=new Date(r.scannedAt), ageDays=Math.floor((Date.now()-sc.getTime())/86400000);
+    var fresh = ageDays<1;
+    $('rdBadge').className='badge '+(fresh?'live':'stale');
+    $('rdBadge').textContent=(fresh?'LIVE · ':'⚠ STALE · ')+sc.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})+(fresh?'':' ('+ageDays+'d old)');
+    $('rdStatus').textContent='scan covers '+RD.length+' stocks · indicators on completed bars';
+    $('rdStatus').className='status';
+    renderRadar();
+  }).catch(function(e){ $('rdStatus').textContent='✗ '+e.message; $('rdStatus').className='status err'; });
+}
+function radarRow(x){
+  var pc=x.precross;
+  return '<tr class="row" data-sym="'+esc(x.sym)+'">'
+    +'<td><span class="sym">'+esc(x.sym)+'</span><br><span class="mut">'+esc(x.sector||'')+'</span></td>'
+    +'<td><span class="band '+(pc.band==='HOT'?'HOT'+(pc.heading==='golden'?' g':''):pc.band)+'">≈'+pc.etaDays+'d</span></td>'
+    +'<td>'+(x.grade?'<span class="grade '+x.grade+'">'+x.grade+'</span>':'—')+'</td>'
+    +'<td class="mut">'+pc.gapPct+'%</td>'
+    +'<td>'+(x.adx!=null?x.adx:'—')+'</td>'
+    +'<td>'+(x.rsi!=null?x.rsi:'—')+(x.divergence?' <span class="dn">▼</span>':'')+'</td>'
+    +'<td class="'+(x.macdAboveZero?'up':'dn')+'">'+(x.macdHist!=null?x.macdHist:'—')+(x.macdExpanding?'▲':'')+'</td>'
+    +'<td>'+(x.rvol!=null?x.rvol:'—')+'</td>'
+    +'<td>'+(x.hazards||[]).map(function(h){return '<span class="hz">'+esc(h.slice(0,4))+'</span>';}).join('')+'</td>'
+    +'</tr>';
+}
+function renderRadar(){
+  var band=$('fBand').value, adxOnly=$('fAdx').checked, sec=$('fSector').value, gr=$('fGrade').value;
+  var gradeRank={A:0,B:1,C:2};
+  function pick(heading){
+    var rows=RD.filter(function(x){
+      var pc=x.precross;
+      if(!pc||pc.heading!==heading||pc.etaDays==null) return false;
+      if(band && pc.band!==band) return false;
+      if(adxOnly && !(x.adx>=25)) return false;
+      if(sec && x.sector!==sec) return false;
+      if(gr && x.grade!==gr) return false;
+      return true;
+    });
+    rows.sort(function(a,b){
+      var g=(gradeRank[a.grade]!=null?gradeRank[a.grade]:9)-(gradeRank[b.grade]!=null?gradeRank[b.grade]:9);
+      return g!==0?g:(a.precross.etaDays-b.precross.etaDays);
+    });
+    return rows;
+  }
+  var G=pick('golden'), D=pick('death'), CAP=40;
+  $('goldBody').innerHTML = G.slice(0,CAP).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
+  $('deathBody').innerHTML = D.slice(0,CAP).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
+  $('goldShow').textContent='showing '+Math.min(CAP,G.length)+' of '+G.length;
+  $('deathShow').textContent='showing '+Math.min(CAP,D.length)+' of '+D.length;
+}
+/* radar row click → jump to portfolio deep dive */
+['goldBody','deathBody'].forEach(function(id){
+  $(id).addEventListener('click',function(e){
+    var tr=e.target.closest('tr.row'); if(!tr) return;
+    document.querySelector('.tab[data-tab=pf]').click();
+    openDive(tr.dataset.sym);
+  });
+});
+
+/* ══════════════ boot ══════════════ */
+(function(){
+  if(API.indexOf('PASTE_')===0){ pfStatus('⚠ set the API constant at the top of the script to your /exec URL',true); return; }
+  pfStatus('loading universe + portfolios…');
+  Promise.all([loadUniverse(), loadPortfolios()]).then(function(){
+    pfStatus('ready — pick or create a portfolio, or open the Cross Radar');
+  }).catch(function(e){ pfStatus('✗ '+e.message,true); });
+})();
+</script>
+</body>
+</html>
