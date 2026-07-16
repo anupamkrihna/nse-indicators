@@ -451,6 +451,7 @@ function radarRow(x){
     +'</tr>';
 }
 function renderRadar(){
+  showN={golden:40,death:40};
   var band=$('fBand').value, adxOnly=$('fAdx').checked, sec=$('fSector').value, gr=$('fGrade').value;
   var gradeRank={A:0,B:1,C:2};
   function pick(heading){
@@ -469,11 +470,28 @@ function renderRadar(){
     });
     return rows;
   }
-  var G=pick('golden'), D=pick('death'), CAP=40;
-  $('goldBody').innerHTML = G.slice(0,CAP).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
-  $('deathBody').innerHTML = D.slice(0,CAP).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
-  $('goldShow').textContent='showing '+Math.min(CAP,G.length)+' of '+G.length;
-  $('deathShow').textContent='showing '+Math.min(CAP,D.length)+' of '+D.length;
+  var G=pick('golden'), D=pick('death');
+  RD_LAST={golden:G, death:D};
+  $('goldBody').innerHTML = G.slice(0,showN.golden).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
+  $('deathBody').innerHTML = D.slice(0,showN.death).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
+  showLine('goldShow','golden',G.length);
+  showLine('deathShow','death',D.length);
+}
+var RD_LAST={golden:[],death:[]}, showN={golden:40,death:40};
+function showLine(id,h,total){
+  var shown=Math.min(showN[h],total);
+  var html='showing '+shown+' of '+total;
+  if(total>shown){
+    html+=' &nbsp;<button style="padding:3px 10px;font-size:11px" onclick="moreRows(\''+h+'\',40)">▼ show 40 more</button>'
+        +' <button style="padding:3px 10px;font-size:11px" onclick="moreRows(\''+h+'\',999999)">show all '+total+'</button>';
+  }
+  $(id).innerHTML=html;
+}
+function moreRows(h,n){
+  showN[h]+=n;
+  var rows=RD_LAST[h];
+  $((h==='golden'?'gold':'death')+'Body').innerHTML = rows.slice(0,showN[h]).map(radarRow).join('');
+  showLine(h==='golden'?'goldShow':'deathShow',h,rows.length);
 }
 /* radar row click → jump to portfolio deep dive */
 ['goldBody','deathBody'].forEach(function(id){
