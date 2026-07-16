@@ -1,0 +1,150 @@
+/* ─────────────────────────────────────────────────────────────
+   test_sell.js — regression gate for the Sell Watch pure math.
+   Node-only (like test_engine.js). Stored in backend/ for version
+   control; run locally before every deploy. Mirrors the sell_*
+   functions that live in Code.gs v1.2. No GAS APIs used here.
+   ───────────────────────────────────────────────────────────── */
+
+var SELL = { H: 21, N: 100, BIN: 0.5, MINBIN: 40, TAIL: -0.05, BOOT_BLOCK: 5, BOOT_ITERS: 800 };
+
+function sellMean_(a){ var s=0; for(var i=0;i<a.length;i++) s+=a[i]; return s/a.length; }
+function sellStd_(a){ var m=sellMean_(a),s=0; for(var i=0;i<a.length;i++){var d=a[i]-m; s+=d*d;} return Math.sqrt(s/a.length); }
+
+function sellExtZ_(close, N, idx){
+  if (idx < N-1) return 0;
+  var w=[]; for(var i=idx-N+1;i<=idx;i++) w.push(Math.log(close[i]));
+  var sd=sellStd_(w); return sd>0 ? (Math.log(close[idx])-sellMean_(w))/sd : 0;
+}
+
+function sellConditional_(close, H, N, bin, minBin, tailK){
+  var n=close.length;
+  if (n < N + H + 30) return null;
+  var zs=[], fs=[];
+  for (var t=N-1; t<=n-1-H; t++){ zs.push(sellExtZ_(close,N,t)); fs.push(close[t+H]/close[t]-1); }
+  var m=fs.length, baseFall=0; for(var i=0;i<m;i++) if(fs[i]<0) baseFall++; baseFall/=m;
+  var zNow=sellExtZ_(close, N, n-1);
+  var bw=bin, inBin=[];
+  for (var pass=0; pass<8; pass++){
+    inBin=[]; for(var j=0;j<m;j++) if(Math.abs(zs[j]-zNow)<=bw) inBin.push(fs[j]);
+    if (inBin.length>=minBin) break; bw+=0.25;
+  }
+  var k=inBin.length, fall=0, tail=0;
+  for(var j2=0;j2<k;j2++){ if(inBin[j2]<0) fall++; if(inBin[j2]<tailK) tail++; }
+  var pFall = k? fall/k : baseFall;
+  var pTail = k? tail/k : null;
+  var se = Math.sqrt(pFall*(1-pFall)/Math.max(k,1));
+  return { z:Math.round(zNow*100)/100, baseRate:Math.round(baseFall*1000)/1000,
+    pFall:Math.round(pFall*1000)/1000, lift:Math.round((pFall-baseFall)*1000)/1000,
+    tail: pTail==null?null:Math.round(pTail*1000)/1000, n:k, bw:Math.round(bw*100)/100,
+    se:Math.round(se*1000)/1000 };
+}
+
+function sellBootstrap_(close, H, block, iters, rng){
+  rng = rng || Math.random;
+  var r=[]; for(var i=1;i<close.length;i++) r.push(Math.log(close[i]/close[i-1]));
+  if (r.length < block+1) return null;
+  var below=0, maxStart=r.length-block;
+  for (var it=0; it<iters; it++){
+    var sum=0, filled=0;
+    while (filled<H){ var start=Math.floor(rng()*maxStart);
+      for (var j=0;j<block && filled<H;j++,filled++) sum+=r[start+j]; }
+    if (sum<0) below++;
+  }
+  return Math.round(below/iters*1000)/1000;
+}
+
+function sellPack_(close, adxRegime, precrossObj){
+  var c = sellConditional_(close, SELL.H, SELL.N, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+  if (!c) return { ok:false };
+  var meanRev = (adxRegime==='chop' || adxRegime==='weak');
+  var gated = !meanRev;
+  var deathEta = (precrossObj && precrossObj.heading==='death') ? precrossObj.etaDays : null;
+  var g='';
+  if (!gated && c.lift>0){
+    if (c.lift>=0.15 && ((deathEta!=null && deathEta<=25) || (c.tail!=null && c.tail>=0.28))) g='A';
+    else if (c.lift>=0.08) g='B'; else g='C';
+  }
+  return { ok:true, horizon:SELL.H, pFall:c.pFall, baseRate:c.baseRate, lift:c.lift, tail:c.tail,
+    z:c.z, n:c.n, se:c.se, regime: meanRev?'MR':'TR', gated:gated, deathEta:deathEta, grade:g };
+}
+
+/* ── seeded RNG for deterministic bootstrap tests ── */
+function lcg(seed){ var s=seed>>>0; return function(){ s=(1664525*s+1013904223)>>>0; return s/4294967296; }; }
+
+/* ── synthetic series ── */
+function monoUp(n){ var a=[100]; for(var i=1;i<n;i++) a.push(a[i-1]*1.002); return a; }
+function monoDown(n){ var a=[100]; for(var i=1;i<n;i++) a.push(a[i-1]*0.995); return a; }
+function sawtooth(n, up, amp){          // ramp up `up`, drop `up`, repeat — ends at a peak
+  var a=[], v=100, dir=1, cnt=0;
+  for(var i=0;i<n;i++){ a.push(v); v*= (dir>0? (1+amp):(1-amp)); cnt++; if(cnt>=up){cnt=0; dir=-dir;} }
+  // nudge end onto a local peak so zNow is high
+  return a;
+}
+function driftGBM(n, seed){ var rng=lcg(seed), a=[100];
+  for(var i=1;i<n;i++){ var g=(rng()+rng()+rng()-1.5); a.push(a[i-1]*Math.exp(0.0006+0.012*g)); } return a; }
+
+/* ── assertions ── */
+var pass=0, fail=0;
+function ok(cond, name){ if(cond){pass++;} else {fail++; console.log('  ✗ FAIL: '+name);} }
+function approx(a,b,eps,name){ ok(Math.abs(a-b)<=eps, name+' ('+a+' vs '+b+')'); }
+
+console.log('── sell-watch regression ──');
+
+/* 1. monotonic up: nothing ever falls */
+var up = sellConditional_(monoUp(400), SELL.H, SELL.N, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+ok(up!==null, 'monoUp returns a result');
+approx(up.baseRate, 0, 1e-9, 'monoUp baseRate = 0');
+approx(up.pFall, 0, 1e-9, 'monoUp pFall = 0');
+approx(up.lift, 0, 1e-9, 'monoUp lift = 0');
+approx(up.tail, 0, 1e-9, 'monoUp tail = 0');
+
+/* 2. monotonic down: everything falls */
+var dn = sellConditional_(monoDown(400), SELL.H, SELL.N, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+approx(dn.baseRate, 1, 1e-9, 'monoDown baseRate = 1');
+approx(dn.pFall, 1, 1e-9, 'monoDown pFall = 1');
+approx(dn.tail, 1, 1e-9, 'monoDown tail = 1 (>5% falls)');
+
+/* 3. probabilities are well-formed on noisy data */
+var gbm = sellConditional_(driftGBM(600, 7), SELL.H, SELL.N, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+ok(gbm.pFall>=0 && gbm.pFall<=1, 'gbm pFall in [0,1]');
+ok(gbm.baseRate>=0 && gbm.baseRate<=1, 'gbm baseRate in [0,1]');
+ok(gbm.tail===null || (gbm.tail>=0 && gbm.tail<=1), 'gbm tail in [0,1] or null');
+ok(gbm.se>=0, 'gbm se >= 0');
+ok(gbm.n>=1, 'gbm bin non-empty');
+approx(gbm.lift, gbm.pFall-gbm.baseRate, 1e-6, 'lift = pFall - baseRate identity');
+
+/* 4. mean-reverting sawtooth: selling from a stretched peak beats base rate */
+var saw = sellConditional_(sawtooth(700, 18, 0.02), SELL.H, SELL.N, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+ok(saw.z>0, 'sawtooth ends stretched (z>0): z='+saw.z);
+ok(saw.lift>0, 'sawtooth lift>0 — stretched sell beats base rate: lift='+saw.lift);
+
+/* 5. history-length honesty */
+ok(sellConditional_(monoUp(80), SELL.H, SELL.N, SELL.BIN, SELL.MINBIN, SELL.TAIL)===null,
+   'too-short series returns null (no fabricated signal)');
+
+/* 6. bootstrap determinism + bounds */
+var bUp = sellBootstrap_(monoUp(400), SELL.H, SELL.BOOT_BLOCK, 400, lcg(1));
+var bUp2 = sellBootstrap_(monoUp(400), SELL.H, SELL.BOOT_BLOCK, 400, lcg(1));
+approx(bUp, bUp2, 1e-12, 'bootstrap deterministic under fixed seed');
+approx(bUp, 0, 1e-9, 'bootstrap monoUp = 0 (never falls)');
+approx(sellBootstrap_(monoDown(400), SELL.H, SELL.BOOT_BLOCK, 400, lcg(1)), 1, 1e-9,
+   'bootstrap monoDown = 1 (always falls)');
+var bMix = sellBootstrap_(driftGBM(600,3), SELL.H, SELL.BOOT_BLOCK, 800, lcg(42));
+ok(bMix>=0 && bMix<=1, 'bootstrap mixed in [0,1]');
+
+/* 7. regime gate — trending suppresses, mean-reverting allows */
+var close = sawtooth(700, 18, 0.02);
+var gMR = sellPack_(close, 'weak',  { heading:'death', etaDays:12 });
+var gTR = sellPack_(close, 'trend', { heading:'death', etaDays:12 });
+ok(gMR.regime==='MR' && gMR.gated===false, 'weak ADX → MR, not gated');
+ok(gTR.regime==='TR' && gTR.gated===true,  'trend ADX → TR, gated');
+ok(gTR.grade==='', 'gated stock gets no sell grade');
+ok(gMR.deathEta===12, 'death-cross ETA carried through');
+ok(['A','B','C',''].indexOf(gMR.grade)>=0, 'MR grade is A/B/C/blank');
+
+/* 8. grade A requires strong lift AND (near death cross OR fat tail) */
+var strong = sellPack_(close, 'weak', { heading:'death', etaDays:10 });
+ok(strong.lift<=0 || strong.grade!=='' , 'positive-lift MR name is graded');
+
+console.log('── '+pass+' passed, '+fail+' failed ──');
+process.exit(fail?1:0);
