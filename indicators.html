@@ -101,6 +101,13 @@ tr.row:hover{ background:#faf7ef; cursor:pointer; }
 .board.death h3{ color:var(--bear); }
 .showing{ font-size:10.5px; color:var(--faint); margin:6px 4px; }
 @media (max-width:900px){ .boards{ grid-template-columns:1fr; } }
+/* ── sell watch ── */
+.pfall{ font-family:var(--mono); font-weight:700; font-size:12px; padding:2px 9px; border-radius:20px; }
+.pfall.pf-hi{ background:#faeeed; color:var(--bear); border:1px solid #e3c2c0; }
+.pfall.pf-mid{ background:#faf4e2; color:var(--goldD); border:1px solid #e6d9b0; }
+.pfall.pf-lo{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
+tr.gated{ opacity:.58; }
+.sl-legend{ font-size:11px; color:var(--muted); background:#f5f1e7; border:1px solid var(--edge); border-radius:9px; padding:9px 12px; margin-top:12px; line-height:1.55; }
 </style>
 </head>
 <body>
@@ -114,6 +121,7 @@ tr.row:hover{ background:#faf7ef; cursor:pointer; }
 <div class="tabs">
   <div class="tab on" data-tab="pf">📁 Portfolio</div>
   <div class="tab" data-tab="radar">📡 Cross Radar</div>
+  <div class="tab" data-tab="sell">📉 Sell Watch</div>
 </div>
 
 <div class="wrap">
@@ -176,6 +184,28 @@ tr.row:hover{ background:#faf7ef; cursor:pointer; }
     </div>
   </div>
 
+  <!-- ═══════════ SELL WATCH ═══════════ -->
+  <div class="panel" id="panel-sell">
+    <div class="status" id="slStatus"></div>
+    <div class="filters">
+      <span id="slBadge" class="badge">–</span>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="radio" name="slScope" value="pf" checked onchange="renderSell()"> Portfolio</label>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="radio" name="slScope" value="uni" onchange="renderSell()"> Universe</label>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" id="slGate" checked onchange="renderSell()"> hide gated (trending)</label>
+      <select id="slSector" onchange="renderSell()"><option value="">sector: all</option></select>
+      <select id="slLift" onchange="renderSell()"><option value="0">lift: any</option><option value="5">lift ≥ +5</option><option value="10">lift ≥ +10</option><option value="15">lift ≥ +15</option></select>
+      <button onclick="renderSell()">Apply</button>
+    </div>
+    <div class="board death">
+      <h3>▼ Sell Watch · ranked by P(fall · 21d)</h3>
+      <div style="overflow:auto"><table><thead><tr>
+        <th>Stock</th><th>P(fall·21d)</th><th>Lift</th><th>Tail &lt;−5%</th><th>Regime · cross</th><th>Grade</th>
+      </tr></thead><tbody id="sellBody"></tbody></table></div>
+      <div class="showing" id="sellShow"></div>
+    </div>
+    <div class="sl-legend"><b>How to read:</b> P(fall) is the share of this stock's history that fell over the next 21 sessions from the current stretch · <b>Lift</b> is P(fall) minus the stock's own base rate — only positive lift is a real edge · <b>MR</b> mean-reverting (sell valid), <b class="gd">TR · gated</b> trending (ADX suppresses the exit) · entry price is ignored throughout.</div>
+  </div>
+
 </div>
 
 <script>
@@ -196,6 +226,7 @@ document.querySelectorAll('.tab').forEach(function(t){
     document.querySelectorAll('.panel').forEach(function(x){x.classList.remove('on');});
     t.classList.add('on'); $('panel-'+t.dataset.tab).classList.add('on');
     if(t.dataset.tab==='radar' && !radarLoaded) loadRadar();
+    if(t.dataset.tab==='sell') loadSell();
   });
 });
 
@@ -354,7 +385,8 @@ function openDive(sym){
       +'<span style="letter-spacing:0;text-transform:none;font-family:var(--mono)"><span style="color:#5ee08a">■ close</span> <span style="color:#e8b94a">■ 50</span> <span style="color:#c98be0">■ 200</span> <span style="color:#8fa1c2">┄ projection</span></span></div>'
       +'<svg id="diveSvg" viewBox="0 0 900 300" preserveAspectRatio="none" style="height:300px"></svg></div>'
       +(p.hazards.length?'<div class="hzline">⚠ '+p.hazards.map(function(h){return esc(h.msg);}).join(' · ')+'</div>':'')
-      +'<div class="verdict">'+verdict+'</div>';
+      +'<div class="verdict">'+verdict+'</div>'
+      + sellDiveBlock_(p);
 
     drawDive(p);
   }).catch(function(e){ d.innerHTML='<div style="color:#f0655a">✗ '+esc(e.message)+'</div>'; });
@@ -501,6 +533,103 @@ function moreRows(h,n){
     openDive(tr.dataset.sym);
   });
 });
+
+/* ══════════════ sell watch (v1.2 — additive) ══════════════ */
+var SL_LAST=[], sellShowN=60, scanFetched=false, slSectorsFilled=false;
+function slBadge_(scannedAt){
+  var sc=new Date(scannedAt), ageDays=Math.floor((Date.now()-sc.getTime())/86400000), fresh=ageDays<1;
+  $('slBadge').className='badge '+(fresh?'live':'stale');
+  $('slBadge').textContent=(fresh?'LIVE · ':'⚠ STALE · ')+sc.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})+(fresh?'':' ('+ageDays+'d old)');
+}
+function fillSlSectors_(){
+  if(slSectorsFilled||!UNI.length) return; var sel=$('slSector');
+  Array.from(new Set(UNI.map(function(u){return u.sector;}))).filter(Boolean).sort().forEach(function(s){
+    var o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
+  slSectorsFilled=true;
+}
+function loadSell(){
+  fillSlSectors_();
+  if(radarLoaded||scanFetched){
+    if(RD.length && RD[0].sell===undefined){
+      $('slStatus').innerHTML='<span class="dn">scan predates v1.2 — re-run <b>runScan()</b> in Apps Script to populate sell metrics.</span>';
+      $('slStatus').className='status err';
+    }
+    if($('slBadge').textContent==='–') { $('slBadge').className='badge live'; $('slBadge').textContent='scan loaded'; }
+    renderSell(); return;
+  }
+  $('slStatus').textContent='loading universe scan…';
+  J(API+'?action=radar').then(function(r){
+    if(!r.ok){ $('slBadge').className='badge unavail'; $('slBadge').textContent='UNAVAILABLE'; $('slStatus').textContent=r.error||'no scan — run runScan() once'; $('slStatus').className='status err'; return; }
+    RD=r.rows.filter(function(x){return x.ok;}); scanFetched=true;
+    slBadge_(r.scannedAt);
+    if(RD.length && RD[0].sell===undefined){ $('slStatus').innerHTML='<span class="dn">scan predates v1.2 — re-run <b>runScan()</b> in Apps Script to populate sell metrics.</span>'; $('slStatus').className='status err'; }
+    else { $('slStatus').textContent='scan covers '+RD.length+' stocks · sell odds on completed bars'; $('slStatus').className='status'; }
+    renderSell();
+  }).catch(function(e){ $('slStatus').textContent='✗ '+e.message; $('slStatus').className='status err'; });
+}
+function sellRow(x){
+  var s=x.sell, p=Math.round(s.pFall*100), lift=Math.round(s.lift*100),
+      tail=s.tail==null?'—':Math.round(s.tail*100)+'%';
+  var cls = p>=55?'pf-hi':(p>=45?'pf-mid':'pf-lo');
+  var liftCls = lift>0?'dn':(lift<0?'up':'mut');       // positive lift = sell pressure → bearish colour
+  var regime = s.gated
+      ? '<span class="gd">TR · gated</span>'
+      : '<span>MR</span>'+(s.deathEta!=null?' · <span class="dn">death '+s.deathEta+'d</span>':' · <span class="mut">—</span>');
+  var grade = s.grade ? '<span class="grade '+s.grade+'">'+s.grade+'</span>' : '—';
+  return '<tr class="row'+(s.gated?' gated':'')+'" data-sym="'+esc(x.sym)+'">'
+    +'<td><span class="sym">'+esc(x.sym)+'</span><br><span class="mut">'+esc(x.sector||'')+'</span></td>'
+    +'<td><span class="pfall '+cls+'">'+p+'%</span></td>'
+    +'<td class="'+liftCls+'">'+(lift>0?'+':'')+lift+'</td>'
+    +'<td>'+tail+'</td>'
+    +'<td style="font-size:11px">'+regime+'</td>'
+    +'<td>'+grade+'</td></tr>';
+}
+function renderSell(){
+  sellShowN=60;
+  var scopeEl=document.querySelector('input[name=slScope]:checked'), scope=scopeEl?scopeEl.value:'pf';
+  var hideGated=$('slGate').checked, sec=$('slSector').value, minLift=parseFloat($('slLift').value||'0');
+  var rows=RD.filter(function(x){
+    if(!x.sell||!x.sell.ok) return false;
+    if(scope==='pf'){ if(!pfSyms.length) return false; if(pfSyms.indexOf(x.sym)<0) return false; }
+    if(sec && x.sector!==sec) return false;
+    if(hideGated && x.sell.gated) return false;
+    if(x.sell.lift*100 < minLift) return false;
+    return true;
+  });
+  rows.sort(function(a,b){ return b.sell.pFall-a.sell.pFall; });
+  SL_LAST=rows;
+  var empty = (scope==='pf'&&!pfSyms.length)
+    ? 'select a portfolio in the Portfolio tab first, or switch to Universe'
+    : 'nothing matching filters';
+  $('sellBody').innerHTML = rows.slice(0,sellShowN).map(sellRow).join('') || '<tr><td colspan="6" class="mut">'+empty+'</td></tr>';
+  sellShowLine(rows.length);
+}
+function sellShowLine(total){
+  var shown=Math.min(sellShowN,total), html='showing '+shown+' of '+total;
+  if(total>shown) html+=' &nbsp;<button style="padding:3px 10px;font-size:11px" onclick="sellMore()">▼ show all '+total+'</button>';
+  $('sellShow').innerHTML=html;
+}
+function sellMore(){ sellShowN=999999; $('sellBody').innerHTML=SL_LAST.map(sellRow).join(''); sellShowLine(SL_LAST.length); }
+/* sell row click → deep dive (same as radar) */
+$('sellBody').addEventListener('click',function(e){
+  var tr=e.target.closest('tr.row'); if(!tr) return;
+  document.querySelector('.tab[data-tab=pf]').click();
+  openDive(tr.dataset.sym);
+});
+/* additive sell verdict inside the deep dive */
+function sellDiveBlock_(p){
+  var s=p.sell; if(!s||!s.ok) return '';
+  var pf=Math.round(s.pFall*100), base=Math.round(s.baseRate*100), lift=Math.round(s.lift*100),
+      tail=s.tail==null?'—':Math.round(s.tail*100)+'%', boot=s.bootstrap==null?null:Math.round(s.bootstrap*100);
+  var head = s.gated
+    ? '<b class="gd">SELL SIGNAL GATED</b> — ADX regime is trending (TR); the statistical mean-reversion exit is suppressed here.'
+    : '<b class="'+(lift>0?'dn':'up')+'">'+(lift>0?'▼ ELEVATED':'· NEUTRAL')+' SELL ODDS</b> — '+pf+'% of history fell over the next '+s.horizon+' sessions from this stretch, vs a '+base+'% base rate (<b>'+(lift>0?'+':'')+lift+' lift</b>).';
+  var extra = ' Tail P(&lt;−5%) <b>'+tail+'</b>.'
+    + (boot!=null?' Bootstrap cross-check <b>'+boot+'%</b>.':'')
+    + (s.deathEta!=null?' Death cross ≈<b>'+s.deathEta+'d</b>.':'')
+    + ' Sell grade <b>'+(s.grade||'—')+'</b>. <span style="color:#63769a">z='+s.z+' · n='+s.n+' · entry price ignored</span>';
+  return '<div class="verdict" style="border-color:'+(!s.gated&&lift>0?'#5a2b2b':'#26374f')+'">'+head+extra+'</div>';
+}
 
 /* ══════════════ boot ══════════════ */
 (function(){
