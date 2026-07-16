@@ -1,1 +1,1116 @@
+/**
+ * ═══════════════════════════════════════════════════════════════════
+ * NSE INDICATORS — fresh backend (v1.0, 16-Jul-2026)
+ * Standalone Google Apps Script project. No dependency on the old
+ * dashboard backend. Bound to its own spreadsheet (Scan + Portfolios).
+ *
+ * ROUTES (all GET, JSON):
+ *   ?action=ping                       → health check
+ *   ?action=ind&sym=HAL                → full per-stock indicator pack + series
+ *   ?action=ind&syms=HAL,BEL,TCS       → scalar matrix (no series)
+ *   ?action=radar                      → cached universe scan + scannedAt
+ *   ?action=pf&sub=list                → portfolios
+ *   ?action=pf&sub=save&name=X&syms=A,B→ create/update portfolio
+ *   ?action=pf&sub=del&name=X          → delete portfolio
+ *   ?action=universe                   → the embedded stock universe
+ *
+ * OPS:
+ *   runScan()      — manual full-universe scan (seed / re-run)
+ *   installTrigger() — daily 18:30 IST scan trigger (run ONCE)
+ *
+ * DESIGN FOR CAPACITY (no throttling, no cell-ceiling pressure):
+ *   · Scan sheet stores ONE JSON cell per symbol (~438 rows total)
+ *   · CacheService fronts Yahoo (25-min TTL) so repeat loads don't refetch
+ *   · Universe fetched in chunked UrlFetchApp.fetchAll (40/batch)
+ *   · No price history stored — series always fetched fresh (2y, adjusted)
+ *
+ * FALSE-SIGNAL DIRECTORY (reference PDF Part 4) — encoded as hazard flags:
+ *   CHOP            ADX<20 → EMA-crossover entries blocked (grade capped C);
+ *                   Supertrend & PSAR marked not-applicable
+ *   COMPRESSED      50/200 gap tight + flat 200 slope → false-crossover zone
+ *   MACD_NOISE      MACD signal-line cross without expanding histogram
+ *   STOCH_TRAP      strong trend (ADX≥25) with stoch pinned >80/<20 →
+ *                   ignore stochastic reversal reads
+ *   DIVERGENCE      bearish RSI divergence during a golden approach → downgrade
+ * ═══════════════════════════════════════════════════════════════════
+ */
 
+var CFG = {
+  RANGE: '2y',
+  CHUNK: 40,                 // symbols per fetchAll batch
+  CACHE_SEC: 1500,           // 25 min per-symbol OHLCV cache
+  SERIES_WINDOW: 220,        // bars returned to charts
+  PRECROSS_LOOKBACK: 10,     // sessions for gap-slope regression
+  HOT_DAYS: 15, WATCH_DAYS: 30,
+  SCAN_SHEET: 'Scan', PF_SHEET: 'Portfolios'
+};
+
+/* ═══════════════ UNIVERSE (sym|name|sector|yfTicker) ═══════════════ */
+function uniList_() {
+  if (uniList_.c) return uniList_.c;
+  uniList_.c = UNIVERSE.split('\n').map(function (r) {
+    var p = r.split('|');
+    return { sym: p[0], name: p[1], sector: p[2], yf: p[3] };
+  });
+  return uniList_.c;
+}
+function uniMap_() {
+  if (uniMap_.c) return uniMap_.c;
+  uniMap_.c = {};
+  uniList_().forEach(function (u) { uniMap_.c[u.sym] = u; });
+  return uniMap_.c;
+}
+
+/* ═══════════════ PURE MATH (Node-stub-tested; no GAS services) ═══════════════ */
+
+function sma(a, n) {
+  var out = new Array(a.length).fill(null), s = 0;
+  for (var i = 0; i < a.length; i++) {
+    s += a[i];
+    if (i >= n) s -= a[i - n];
+    if (i >= n - 1) out[i] = s / n;
+  }
+  return out;
+}
+
+function ema(a, n) {
+  var out = new Array(a.length).fill(null), k = 2 / (n + 1), prev = null, seed = 0;
+  for (var i = 0; i < a.length; i++) {
+    if (i < n - 1) { seed += a[i]; continue; }
+    if (i === n - 1) { prev = (seed + a[i]) / n; out[i] = prev; continue; }
+    prev = a[i] * k + prev * (1 - k); out[i] = prev;
+  }
+  return out;
+}
+
+/* Wilder RSI(14) */
+function rsiSeries(close, n) {
+  n = n || 14;
+  var out = new Array(close.length).fill(null), g = 0, l = 0;
+  for (var i = 1; i < close.length; i++) {
+    var d = close[i] - close[i - 1], up = d > 0 ? d : 0, dn = d < 0 ? -d : 0;
+    if (i <= n) { g += up; l += dn; if (i === n) { g /= n; l /= n; out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l); } continue; }
+    g = (g * (n - 1) + up) / n; l = (l * (n - 1) + dn) / n;
+    out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+  }
+  return out;
+}
+
+/* RSI structural zone per playbook: bull regime rides 40–80, bear 20–60 */
+function rsiZone(v) {
+  if (v == null) return 'na';
+  if (v >= 70) return 'overbought';
+  if (v <= 30) return 'oversold';
+  if (v >= 60) return 'bull-zone';
+  if (v <= 40) return 'bear-zone';
+  return 'neutral';
+}
+
+/* Classic bearish divergence: price higher swing-high, RSI lower high */
+function bearishDivergence(close, rsi, lookback) {
+  lookback = lookback || 60;
+  var n = close.length, from = Math.max(2, n - lookback), peaks = [];
+  for (var i = from; i < n - 1; i++) {
+    if (close[i] > close[i - 1] && close[i] > close[i + 1] && rsi[i] != null) peaks.push(i);
+  }
+  if (peaks.length < 2) return false;
+  var a = peaks[peaks.length - 2], b = peaks[peaks.length - 1];
+  return close[b] > close[a] && rsi[b] < rsi[a];
+}
+
+/* Wilder ATR(14) on true range */
+function atrSeries(hi, lo, cl, n) {
+  n = n || 14;
+  var out = new Array(cl.length).fill(null), prev = null;
+  for (var i = 0; i < cl.length; i++) {
+    var tr = i === 0 ? hi[i] - lo[i]
+      : Math.max(hi[i] - lo[i], Math.abs(hi[i] - cl[i - 1]), Math.abs(lo[i] - cl[i - 1]));
+    if (i < n) { prev = (prev === null ? 0 : prev) + tr; if (i === n - 1) { prev /= n; out[i] = prev; } continue; }
+    prev = (prev * (n - 1) + tr) / n; out[i] = prev;
+  }
+  return out;
+}
+
+/* ADX(14) with +DI/−DI, Wilder smoothing */
+function adxPack(hi, lo, cl, n) {
+  n = n || 14;
+  var len = cl.length, trS = 0, pS = 0, mS = 0, dxArr = [], adx = null, pdi = null, mdi = null;
+  var trPrev = null, pPrev = null, mPrev = null;
+  for (var i = 1; i < len; i++) {
+    var up = hi[i] - hi[i - 1], dn = lo[i - 1] - lo[i];
+    var pDM = (up > dn && up > 0) ? up : 0, mDM = (dn > up && dn > 0) ? dn : 0;
+    var tr = Math.max(hi[i] - lo[i], Math.abs(hi[i] - cl[i - 1]), Math.abs(lo[i] - cl[i - 1]));
+    if (i <= n) {
+      trS += tr; pS += pDM; mS += mDM;
+      if (i === n) { trPrev = trS; pPrev = pS; mPrev = mS; }
+    } else {
+      trPrev = trPrev - trPrev / n + tr;
+      pPrev = pPrev - pPrev / n + pDM;
+      mPrev = mPrev - mPrev / n + mDM;
+    }
+    if (i >= n && trPrev > 0) {
+      pdi = 100 * pPrev / trPrev; mdi = 100 * mPrev / trPrev;
+      var dx = (pdi + mdi) === 0 ? 0 : 100 * Math.abs(pdi - mdi) / (pdi + mdi);
+      dxArr.push(dx);
+      if (dxArr.length === n) adx = dxArr.reduce(function (a, b) { return a + b; }) / n;
+      else if (dxArr.length > n) adx = (adx * (n - 1) + dx) / n;
+    }
+  }
+  var regime = adx == null ? 'na' : adx < 20 ? 'chop' : adx < 25 ? 'weak' : adx < 50 ? 'trend' : 'strong';
+  return { value: adx == null ? null : Math.round(adx * 10) / 10, plusDI: pdi == null ? null : Math.round(pdi * 10) / 10, minusDI: mdi == null ? null : Math.round(mdi * 10) / 10, regime: regime };
+}
+
+/* Supertrend(10, 3×ATR) — returns final state + flip bars-ago */
+function supertrend(hi, lo, cl, period, mult) {
+  period = period || 10; mult = mult || 3;
+  var atr = atrSeries(hi, lo, cl, period), n = cl.length;
+  var upper = [], lower = [], dir = new Array(n).fill(null);
+  var fu = null, fl = null, d = 1;
+  for (var i = 0; i < n; i++) {
+    if (atr[i] == null) { upper.push(null); lower.push(null); continue; }
+    var mid = (hi[i] + lo[i]) / 2, bu = mid + mult * atr[i], bl = mid - mult * atr[i];
+    fu = (fu === null || bu < fu || cl[i - 1] > fu) ? bu : fu;
+    fl = (fl === null || bl > fl || cl[i - 1] < fl) ? bl : fl;
+    if (d === 1 && cl[i] < fl) d = -1;
+    else if (d === -1 && cl[i] > fu) d = 1;
+    upper.push(fu); lower.push(fl); dir[i] = d;
+  }
+  var flip = null;
+  for (var j = n - 1; j > 0; j--) { if (dir[j] != null && dir[j - 1] != null && dir[j] !== dir[j - 1]) { flip = n - 1 - j; break; } }
+  return { state: dir[n - 1] === 1 ? 'buy' : dir[n - 1] === -1 ? 'sell' : 'na', flipBarsAgo: flip };
+}
+
+/* Parabolic SAR (0.02 step, 0.2 max) — final side only */
+function psarSide(hi, lo) {
+  var n = hi.length; if (n < 5) return 'na';
+  var up = true, af = 0.02, maxAf = 0.2, sar = lo[0], ep = hi[0];
+  for (var i = 1; i < n; i++) {
+    sar = sar + af * (ep - sar);
+    if (up) {
+      if (lo[i] < sar) { up = false; sar = ep; ep = lo[i]; af = 0.02; }
+      else if (hi[i] > ep) { ep = hi[i]; af = Math.min(maxAf, af + 0.02); }
+    } else {
+      if (hi[i] > sar) { up = true; sar = ep; ep = hi[i]; af = 0.02; }
+      else if (lo[i] < ep) { ep = lo[i]; af = Math.min(maxAf, af + 0.02); }
+    }
+  }
+  return up ? 'below' : 'above';   // dots below price = uptrend
+}
+
+/* MACD(12,26,9): line, signal, histogram + expanding check */
+function macdPack(close) {
+  var e12 = ema(close, 12), e26 = ema(close, 26), line = [], n = close.length;
+  for (var i = 0; i < n; i++) line.push(e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null);
+  var first = line.findIndex(function (v) { return v != null; });
+  var sig = new Array(n).fill(null);
+  if (first >= 0) {
+    var sub = ema(line.slice(first), 9);
+    for (var j = 0; j < sub.length; j++) sig[first + j] = sub[j];
+  }
+  var hist = line.map(function (v, k) { return v != null && sig[k] != null ? v - sig[k] : null; });
+  var h = hist.filter(function (v) { return v != null; });
+  var expanding = h.length >= 3 && Math.abs(h[h.length - 1]) > Math.abs(h[h.length - 2]) && Math.abs(h[h.length - 2]) > Math.abs(h[h.length - 3]);
+  var L = line[n - 1], S = sig[n - 1], H = hist[n - 1];
+  return {
+    line: L == null ? null : Math.round(L * 100) / 100,
+    signal: S == null ? null : Math.round(S * 100) / 100,
+    hist: H == null ? null : Math.round(H * 100) / 100,
+    histDir: H == null ? 'na' : H > 0 ? 'bull' : 'bear',
+    histExpanding: !!expanding,
+    aboveZero: L != null && L > 0
+  };
+}
+
+/* Stochastic(14,3) */
+function stochPack(hi, lo, cl, n, d) {
+  n = n || 14; d = d || 3;
+  var len = cl.length, kArr = [];
+  for (var i = 0; i < len; i++) {
+    if (i < n - 1) { kArr.push(null); continue; }
+    var hh = -Infinity, ll = Infinity;
+    for (var j = i - n + 1; j <= i; j++) { if (hi[j] > hh) hh = hi[j]; if (lo[j] < ll) ll = lo[j]; }
+    kArr.push(hh === ll ? 50 : 100 * (cl[i] - ll) / (hh - ll));
+  }
+  var kClean = kArr.filter(function (v) { return v != null; });
+  var K = kClean[kClean.length - 1], D = null;
+  if (kClean.length >= d) D = kClean.slice(-d).reduce(function (a, b) { return a + b; }) / d;
+  var state = K == null ? 'na' : K > 80 ? 'overbought' : K < 20 ? 'oversold' : 'mid';
+  return { k: K == null ? null : Math.round(K * 10) / 10, d: D == null ? null : Math.round(D * 10) / 10, state: state };
+}
+
+/* RMI — Relative Momentum Index: RSI computed on n-period momentum */
+function rmiValue(close, n, m) {
+  n = n || 14; m = m || 5;
+  var mom = [];
+  for (var i = m; i < close.length; i++) mom.push(close[i] - close[i - m]);
+  var g = 0, l = 0, out = null;
+  for (var k = 1; k < mom.length; k++) {
+    var up = mom[k] > 0 ? mom[k] : 0, dn = mom[k] < 0 ? -mom[k] : 0;
+    if (k <= n) { g += up; l += dn; if (k === n) { g /= n; l /= n; out = l === 0 ? 100 : 100 - 100 / (1 + g / l); } continue; }
+    g = (g * (n - 1) + up) / n; l = (l * (n - 1) + dn) / n;
+    out = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+  }
+  return out == null ? null : Math.round(out * 10) / 10;
+}
+
+/* OBV + trend over last 20 sessions */
+function obvPack(close, vol) {
+  var obv = [0];
+  for (var i = 1; i < close.length; i++) {
+    obv.push(obv[i - 1] + (close[i] > close[i - 1] ? vol[i] : close[i] < close[i - 1] ? -vol[i] : 0));
+  }
+  var w = obv.slice(-20), slope = linSlope(w);
+  var span = Math.max.apply(null, w) - Math.min.apply(null, w) || 1;
+  var norm = slope * 20 / span;
+  return { obv: obv, trend: norm > 0.15 ? 'rising' : norm < -0.15 ? 'falling' : 'flat' };
+}
+
+function rvol20(vol) {
+  if (vol.length < 21) return null;
+  var last = vol[vol.length - 1], w = vol.slice(-21, -1);
+  var avg = w.reduce(function (a, b) { return a + b; }) / w.length;
+  return avg > 0 ? Math.round(last / avg * 100) / 100 : null;
+}
+
+function linSlope(a) {
+  var n = a.length, sx = 0, sy = 0, sxy = 0, sxx = 0;
+  for (var i = 0; i < n; i++) { sx += i; sy += a[i]; sxy += i * a[i]; sxx += i * i; }
+  var d = n * sxx - sx * sx;
+  return d === 0 ? 0 : (n * sxy - sx * sy) / d;
+}
+
+/* Last cross of fast over slow: {crossed, direction, barsAgo} */
+function crossState(fast, slow) {
+  var ps = null, idx = null, dir = null, n = fast.length;
+  for (var k = 0; k < n; k++) {
+    if (fast[k] == null || slow[k] == null) continue;
+    var sg = Math.sign(fast[k] - slow[k]); if (sg === 0) continue;
+    if (ps != null && sg !== ps) { idx = k; dir = sg > 0 ? 'bullish' : 'bearish'; }
+    ps = sg;
+  }
+  return idx == null ? { crossed: false } : { crossed: true, direction: dir, barsAgo: n - 1 - idx, fresh: (n - 1 - idx) <= 5 };
+}
+
+/* EMA stack state */
+function stackState(price, f, m, s) {
+  if (f == null || m == null || s == null) return 'na';
+  if (price > f && f > m && m > s) return 'bull';
+  if (price < f && f < m && m < s) return 'bear';
+  return 'tangled';
+}
+
+/* ═══ PRE-CROSS PROJECTION — the early-warning core ═══ */
+function precross(fastArr, slowArr, price, lookback) {
+  lookback = lookback || CFG.PRECROSS_LOOKBACK;
+  var n = fastArr.length, gaps = [];
+  for (var i = Math.max(0, n - lookback); i < n; i++) {
+    if (fastArr[i] == null || slowArr[i] == null) return { heading: 'na' };
+    gaps.push((fastArr[i] - slowArr[i]) / price * 100);
+  }
+  if (gaps.length < 3) return { heading: 'na' };
+  var gap = gaps[gaps.length - 1], vel = linSlope(gaps); // % per session
+  var converging = (gap > 0 && vel < 0) || (gap < 0 && vel > 0);
+  var eta = converging && Math.abs(vel) > 1e-6 ? Math.abs(gap) / Math.abs(vel) : null;
+  var heading = !converging ? 'none' : gap < 0 ? 'golden' : 'death';
+  var band = eta == null ? 'none' : eta <= CFG.HOT_DAYS ? 'HOT' : eta <= CFG.WATCH_DAYS ? 'WATCH' : 'far';
+  return {
+    heading: heading,
+    gapPct: Math.round(gap * 100) / 100,
+    velPctPerDay: Math.round(vel * 1000) / 1000,
+    etaDays: eta == null ? null : Math.round(eta),
+    band: band
+  };
+}
+
+/* ═══ HAZARDS (False-Signal Directory, PDF Part 4) + GRADE ═══ */
+function hazardsAndGrade(pack) {
+  var hz = [];
+  var adx = pack.adx, pc = pack.precross, macd = pack.macd, stoch = pack.stoch;
+
+  if (adx.regime === 'chop' || adx.regime === 'weak')
+    hz.push({ code: 'CHOP', msg: 'ADX ' + adx.value + ' <25 — crossover entries blocked; Supertrend/PSAR unreliable here' });
+
+  if (pc.gapPct != null && Math.abs(pc.gapPct) < 0.6 && Math.abs(pack.sma200SlopePct) < 0.02)
+    hz.push({ code: 'COMPRESSED', msg: '50/200 compressed on a flat 200 — classic false-crossover zone' });
+
+  if (macd.hist != null && !macd.histExpanding && pack.crossEma.crossed && pack.crossEma.fresh)
+    hz.push({ code: 'MACD_NOISE', msg: 'fresh MA cross without expanding MACD histogram — unconfirmed' });
+
+  if ((adx.regime === 'trend' || adx.regime === 'strong') && (stoch.state === 'overbought' || stoch.state === 'oversold'))
+    hz.push({ code: 'STOCH_TRAP', msg: 'stoch pinned ' + stoch.state + ' in a strong trend — ignore reversal read' });
+
+  if (pack.rsiDivergence && pc.heading === 'golden')
+    hz.push({ code: 'DIVERGENCE', msg: 'bearish RSI divergence while approaching golden — momentum not confirming' });
+
+  /* grade the approaching-cross setup */
+  var grade = null;
+  if (pc.heading === 'golden' || pc.heading === 'death') {
+    var confirms = 0;
+    if (macd.histExpanding && ((pc.heading === 'golden') === (macd.histDir === 'bull'))) confirms++;
+    if (pack.rvol != null && pack.rvol >= 1.5) confirms++;
+    if (pc.heading === 'golden' && (pack.rsiValue >= 40 && pack.rsiValue <= 80)) confirms++;
+    if (pc.heading === 'death' && (pack.rsiValue >= 20 && pack.rsiValue <= 60)) confirms++;
+    if (pack.obvTrend === (pc.heading === 'golden' ? 'rising' : 'falling')) confirms++;
+
+    var chopBlocked = hz.some(function (h) { return h.code === 'CHOP' || h.code === 'COMPRESSED'; });
+    var diverged = hz.some(function (h) { return h.code === 'DIVERGENCE'; });
+
+    if (chopBlocked) grade = 'C';
+    else if (diverged) grade = 'C';
+    else if ((adx.regime === 'trend' || adx.regime === 'strong') && confirms >= 2) grade = 'A';
+    else grade = 'B';
+  }
+  return { hazards: hz, grade: grade };
+}
+
+/* ═══ FULL PER-STOCK COMPUTE (pure — takes OHLCV, returns pack) ═══ */
+function computePack(bars, withSeries) {
+  var cl = bars.close, hi = bars.high, lo = bars.low, vol = bars.volume, n = cl.length;
+  if (n < 210) return { ok: false, error: 'insufficient history (' + n + ' bars, need 210+)' };
+
+  var e20 = ema(cl, 20), e50 = ema(cl, 50), e200 = ema(cl, 200);
+  var s50 = sma(cl, 50), s200 = sma(cl, 200), s20 = sma(cl, 20);
+  var price = cl[n - 1];
+
+  var rsiArr = rsiSeries(cl, 14), rsiV = rsiArr[n - 1];
+  var adx = adxPack(hi, lo, cl, 14);
+  var st = supertrend(hi, lo, cl, 10, 3);
+  var sar = psarSide(hi, lo);
+  var macd = macdPack(cl);
+  var stoch = stochPack(hi, lo, cl, 14, 3);
+  var rmi = rmiValue(cl, 14, 5);
+  var ob = obvPack(cl, vol);
+  var rv = rvol20(vol);
+
+  var crossEma = crossState(e50, e200), crossSma = crossState(s50, s200);
+  var pcEma = precross(e50, e200, price), pcSma = precross(s50, s200, price);
+
+  /* flat-200 measure for COMPRESSED hazard: 10-session SMA200 slope as % of price */
+  var s200w = s200.slice(-10).filter(function (v) { return v != null; });
+  var sma200SlopePct = s200w.length >= 3 ? linSlope(s200w) / price * 100 : 0;
+
+  var pack = {
+    ok: true,
+    price: Math.round(price * 100) / 100,          // last COMPLETED close — all indicators anchor here
+    livePrice: bars.live ? Math.round(bars.live.price * 100) / 100 : null,
+    intraday: !!bars.partialDropped,               // true = market open; today's partial bar excluded
+    bars: n,
+    adjusted: !!bars.adjusted,
+    stack: stackState(price, e20[n - 1], e50[n - 1], e200[n - 1]),
+    ema: { e20: r2(e20[n - 1]), e50: r2(e50[n - 1]), e200: r2(e200[n - 1]) },
+    smaX: { s50: r2(s50[n - 1]), s200: r2(s200[n - 1]) },
+    crossEma: crossEma, crossSma: crossSma,
+    precross: pcEma, precrossSma: pcSma,
+    adx: adx,
+    rsiValue: rsiV == null ? null : Math.round(rsiV * 10) / 10,
+    rsiZoneV: rsiZone(rsiV),
+    rsiDivergence: bearishDivergence(cl, rsiArr, 60),
+    macd: macd,
+    stoch: stoch,
+    stochApplicable: adx.regime === 'chop' || adx.regime === 'weak',
+    rmi: rmi,
+    supertrendV: st,
+    trendToolsApplicable: adx.regime === 'trend' || adx.regime === 'strong',
+    psar: sar,
+    rvol: rv,
+    obvTrend: ob.trend,
+    sma200SlopePct: Math.round(sma200SlopePct * 1000) / 1000
+  };
+
+  var hg = hazardsAndGrade(pack);
+  pack.hazards = hg.hazards;
+  pack.grade = hg.grade;
+
+  if (withSeries) {
+    var w = CFG.SERIES_WINDOW;
+    pack.series = {
+      close: tailArr(cl, w), volume: tailArr(vol, w),
+      ema20: tailArr(e20, w), ema50: tailArr(e50, w), ema200: tailArr(e200, w),
+      sma50: tailArr(s50, w), sma200: tailArr(s200, w),
+      obv: tailArr(ob.obv, w)
+    };
+  }
+  return pack;
+}
+
+/* scalar subset for matrix / radar rows */
+function scalarRow(sym, pack, meta) {
+  if (!pack.ok) return { sym: sym, ok: false, error: pack.error };
+  return {
+    sym: sym, name: meta ? meta.name : '', sector: meta ? meta.sector : '',
+    ok: true, price: pack.price, livePrice: pack.livePrice, intraday: pack.intraday, stack: pack.stack,
+    crossEma: pack.crossEma, crossSma: pack.crossSma,
+    precross: pack.precross, adx: pack.adx.value, adxRegime: pack.adx.regime,
+    rsi: pack.rsiValue, rsiZone: pack.rsiZoneV, divergence: pack.rsiDivergence,
+    macdHist: pack.macd.hist, macdExpanding: pack.macd.histExpanding, macdAboveZero: pack.macd.aboveZero,
+    supertrend: pack.supertrendV.state, psar: pack.psar,
+    stochK: pack.stoch.k, stochState: pack.stoch.state,
+    rmi: pack.rmi, rvol: pack.rvol, obvTrend: pack.obvTrend,
+    hazards: pack.hazards.map(function (h) { return h.code; }),
+    grade: pack.grade
+  };
+}
+
+function r2(v) { return v == null ? null : Math.round(v * 100) / 100; }
+function tailArr(a, n) { return a.length > n ? a.slice(a.length - n) : a; }
+
+/* ═══════════════ YAHOO FETCH (GAS-only from here down) ═══════════════ */
+
+function yahooUrl_(yf) {
+  return 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(yf)
+    + '?range=' + CFG.RANGE + '&interval=1d&events=split';
+}
+function fetchOpts_() {
+  return {
+    muteHttpExceptions: true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'Accept': 'application/json'
+    }
+  };
+}
+
+/* Parse one Yahoo v8 payload → aligned OHLCV, split-adjusted throughout.
+   H/L are scaled by adjclose/close so range indicators are split-safe. */
+function parseYahoo_(json) {
+  var res = json && json.chart && json.chart.result && json.chart.result[0];
+  if (!res) return null;
+  var q = res.indicators.quote[0];
+  var adj = res.indicators.adjclose && res.indicators.adjclose[0] && res.indicators.adjclose[0].adjclose;
+  var ts = res.timestamp || [];
+  var cl = [], hi = [], lo = [], vol = [], tArr = [], hasAdj = !!adj;
+  for (var i = 0; i < q.close.length; i++) {
+    if (q.close[i] == null || q.high[i] == null || q.low[i] == null) continue;
+    var c = q.close[i], f = (hasAdj && adj[i] != null && c !== 0) ? adj[i] / c : 1;
+    cl.push(c * f); hi.push(q.high[i] * f); lo.push(q.low[i] * f);
+    vol.push(q.volume[i] == null ? 0 : q.volume[i]);
+    tArr.push(ts[i] || null);
+  }
+  var bars = { close: cl, high: hi, low: lo, volume: vol, ts: tArr, adjusted: hasAdj };
+  return trimPartialBar(bars, Date.now());
+}
+
+/* PURE: drop today's in-progress candle so indicators run on COMPLETED bars
+   only ("confirm on close"). Live price preserved separately for display.
+   A bar is partial iff its IST calendar day == today's AND now is before
+   ~15:35 IST (NSE closes 15:30). IST = UTC+5:30, no DST. */
+function trimPartialBar(bars, nowMs) {
+  var n = bars.close.length;
+  if (!n || !bars.ts || bars.ts[n - 1] == null) return bars;
+  var IST_OFF = 19800; // seconds
+  var lastDay = Math.floor((bars.ts[n - 1] + IST_OFF) / 86400);
+  var nowSec = Math.floor(nowMs / 1000);
+  var nowDay = Math.floor((nowSec + IST_OFF) / 86400);
+  var nowMin = Math.floor(((nowSec + IST_OFF) % 86400) / 60); // minutes since IST midnight
+  if (lastDay === nowDay && nowMin < 935) {                    // before 15:35 IST
+    bars.live = { price: bars.close[n - 1], volumeSoFar: bars.volume[n - 1] };
+    bars.close = bars.close.slice(0, n - 1);
+    bars.high = bars.high.slice(0, n - 1);
+    bars.low = bars.low.slice(0, n - 1);
+    bars.volume = bars.volume.slice(0, n - 1);
+    bars.ts = bars.ts.slice(0, n - 1);
+    bars.partialDropped = true;
+  }
+  return bars;
+}
+
+function getBars_(sym) {
+  var u = uniMap_()[sym];
+  var yf = u ? u.yf : sym + '.NS';
+  var cache = CacheService.getScriptCache();
+  var key = 'b2:' + yf;
+  var hit = cache.get(key);
+  if (hit) return JSON.parse(hit);
+  var resp = UrlFetchApp.fetch(yahooUrl_(yf), fetchOpts_());
+  if (resp.getResponseCode() !== 200) return null;
+  var bars = parseYahoo_(JSON.parse(resp.getContentText()));
+  if (bars) { try { cache.put(key, JSON.stringify(bars), CFG.CACHE_SEC); } catch (e) { /* >100KB: skip cache */ } }
+  return bars;
+}
+
+/* Parallel fetch for many symbols → {sym: bars} */
+function getBarsMany_(syms) {
+  var out = {}, need = [], map = uniMap_();
+  var cache = CacheService.getScriptCache();
+  syms.forEach(function (s) {
+    var yf = map[s] ? map[s].yf : s + '.NS';
+    var hit = cache.get('b2:' + yf);
+    if (hit) out[s] = JSON.parse(hit); else need.push(s);
+  });
+  for (var i = 0; i < need.length; i += CFG.CHUNK) {
+    var chunk = need.slice(i, i + CFG.CHUNK);
+    var reqs = chunk.map(function (s) {
+      var yf = map[s] ? map[s].yf : s + '.NS';
+      var o = fetchOpts_(); o.url = yahooUrl_(yf); return o;
+    });
+    var resps = UrlFetchApp.fetchAll(reqs);
+    for (var j = 0; j < resps.length; j++) {
+      try {
+        if (resps[j].getResponseCode() !== 200) continue;
+        var bars = parseYahoo_(JSON.parse(resps[j].getContentText()));
+        if (bars) {
+          out[chunk[j]] = bars;
+          var yf2 = map[chunk[j]] ? map[chunk[j]].yf : chunk[j] + '.NS';
+          try { cache.put('b2:' + yf2, JSON.stringify(bars), CFG.CACHE_SEC); } catch (e) { }
+        }
+      } catch (e) { /* skip symbol */ }
+    }
+    if (i + CFG.CHUNK < need.length) Utilities.sleep(400);   // be polite, avoid burst throttling
+  }
+  return out;
+}
+
+/* ═══════════════ SHEET STORE ═══════════════ */
+function ss_() { return SpreadsheetApp.getActiveSpreadsheet(); }
+function sheet_(name, headers) {
+  var sh = ss_().getSheetByName(name);
+  if (!sh) { sh = ss_().insertSheet(name); if (headers) sh.appendRow(headers); }
+  return sh;
+}
+
+/* ═══════════════ SCAN (daily trigger + manual) ═══════════════ */
+function runScan() {
+  var t0 = Date.now();
+  var uni = uniList_(), rows = [], syms = uni.map(function (u) { return u.sym; });
+  var barsMap = getBarsMany_(syms);
+  uni.forEach(function (u) {
+    var bars = barsMap[u.sym];
+    var pack = bars ? computePack(bars, false) : { ok: false, error: 'fetch failed' };
+    rows.push([u.sym, JSON.stringify(scalarRow(u.sym, pack, u))]);
+  });
+  var sh = sheet_(CFG.SCAN_SHEET, null);
+  sh.clear();
+  sh.getRange(1, 1).setValue('scannedAt');
+  sh.getRange(1, 2).setValue(new Date().toISOString());
+  if (rows.length) sh.getRange(2, 1, rows.length, 2).setValues(rows);
+  Logger.log('scan: ' + rows.length + ' symbols in ' + Math.round((Date.now() - t0) / 1000) + 's');
+}
+
+function installTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'runScan') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('runScan').timeBased().atHour(18).nearMinute(30).everyDays(1).create();
+  Logger.log('daily runScan trigger installed (~18:30 script-timezone — set project timezone to Asia/Kolkata)');
+}
+
+/* ═══════════════ ROUTES ═══════════════ */
+function doGet(e) {
+  var a = (e.parameter.action || '').toLowerCase();
+  var out;
+  try {
+    if (a === 'ping') out = { ok: true, v: '1.1', now: new Date().toISOString() };
+    else if (a === 'universe') out = { ok: true, universe: uniList_() };
+    else if (a === 'ind') out = routeInd_(e);
+    else if (a === 'radar') out = routeRadar_();
+    else if (a === 'pf') out = routePf_(e);
+    else out = { ok: false, error: 'unknown action' };
+  } catch (err) {
+    out = { ok: false, error: String(err) };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function routeInd_(e) {
+  if (e.parameter.sym) {
+    var sym = e.parameter.sym.toUpperCase().replace(/\.NS$/, '');
+    var bars = getBars_(sym);
+    if (!bars) return { ok: false, error: 'fetch failed for ' + sym };
+    var pack = computePack(bars, true);
+    pack.sym = sym;
+    var meta = uniMap_()[sym];
+    if (meta) { pack.name = meta.name; pack.sector = meta.sector; }
+    return pack;
+  }
+  if (e.parameter.syms) {
+    var syms = e.parameter.syms.toUpperCase().split(',').map(function (s) { return s.trim().replace(/\.NS$/, ''); }).filter(Boolean).slice(0, 60);
+    var barsMap = getBarsMany_(syms), rows = [], map = uniMap_();
+    syms.forEach(function (s) {
+      var b = barsMap[s];
+      rows.push(b ? scalarRow(s, computePack(b, false), map[s]) : { sym: s, ok: false, error: 'fetch failed' });
+    });
+    return { ok: true, rows: rows, at: new Date().toISOString() };
+  }
+  return { ok: false, error: 'sym or syms required' };
+}
+
+function routeRadar_() {
+  var sh = ss_().getSheetByName(CFG.SCAN_SHEET);
+  if (!sh || sh.getLastRow() < 2) return { ok: false, error: 'no scan yet — run runScan once', state: 'UNAVAILABLE' };
+  var scannedAt = sh.getRange(1, 2).getValue();
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+  var rows = data.map(function (r) { try { return JSON.parse(r[1]); } catch (e) { return null; } }).filter(Boolean);
+  return { ok: true, scannedAt: scannedAt instanceof Date ? scannedAt.toISOString() : String(scannedAt), rows: rows };
+}
+
+function routePf_(e) {
+  var sub = (e.parameter.sub || 'list').toLowerCase();
+  var sh = sheet_(CFG.PF_SHEET, ['name', 'symbols', 'updatedAt']);
+  var last = sh.getLastRow();
+  var data = last > 1 ? sh.getRange(2, 1, last - 1, 3).getValues() : [];
+  if (sub === 'list') {
+    return { ok: true, portfolios: data.map(function (r) { return { name: r[0], symbols: String(r[1]).split(',').filter(Boolean), updatedAt: r[2] }; }) };
+  }
+  var name = (e.parameter.name || '').trim();
+  if (!name) return { ok: false, error: 'name required' };
+  var rowIdx = -1;
+  for (var i = 0; i < data.length; i++) if (data[i][0] === name) { rowIdx = i + 2; break; }
+  if (sub === 'save') {
+    var syms = (e.parameter.syms || '').toUpperCase().split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!syms.length) return { ok: false, error: 'syms required' };
+    var row = [name, syms.join(','), new Date().toISOString()];
+    if (rowIdx > 0) sh.getRange(rowIdx, 1, 1, 3).setValues([row]); else sh.appendRow(row);
+    return { ok: true, saved: name, count: syms.length };
+  }
+  if (sub === 'del') {
+    if (rowIdx > 0) { sh.deleteRow(rowIdx); return { ok: true, deleted: name }; }
+    return { ok: false, error: 'not found' };
+  }
+  return { ok: false, error: 'unknown sub' };
+}
+
+/* run wrappers (functions ending _ are hidden from the Run dropdown) */
+function runPing() { Logger.log(JSON.stringify(doGet({ parameter: { action: 'ping' } }).getContent())); }
+function runIndHAL() { Logger.log(doGet({ parameter: { action: 'ind', sym: 'HAL' } }).getContent().slice(0, 800)); }
+
+/* ═══════════════ UNIVERSE DATA (438 stocks: sym|name|sector|yf) ═══════════════ */
+var UNIVERSE =
+'AARTIIND|Aarti Industries|Chemicals|AARTIIND.NS\n' +
+'ABB|ABB India|Industrial|ABB.NS\n' +
+'ABBOTINDIA|Abbott India|Pharma|ABBOTINDIA.NS\n' +
+'ABCAPITAL|Aditya Birla Capital|Financial Services|ABCAPITAL.NS\n' +
+'ABFRL|Aditya Birla Fashion|Retail|ABFRL.NS\n' +
+'ADANIENT|Adani Enterprises|Conglomerate|ADANIENT.NS\n' +
+'ADANIGREEN|Adani Green Energy|Renewable Energy|ADANIGREEN.NS\n' +
+'ADANIPORTS|Adani Ports & SEZ|Infrastructure|ADANIPORTS.NS\n' +
+'ADANIPOWER|Adani Power|Power|ADANIPOWER.NS\n' +
+'AIAENG|AIA Engineering|Industrial|AIAENG.NS\n' +
+'AJANTPHARM|Ajanta Pharma|Pharma|AJANTPHARM.NS\n' +
+'ALKEM|Alkem Laboratories|Pharma|ALKEM.NS\n' +
+'AMBUJACEM|Ambuja Cements|Cement|AMBUJACEM.NS\n' +
+'ANANTRAJ|Anant Raj|Realty|ANANTRAJ.NS\n' +
+'ANGELONE|Angel One|Financial Services|ANGELONE.NS\n' +
+'APLAPOLLO|APL Apollo Tubes|Metal|APLAPOLLO.NS\n' +
+'APOLLOHOSP|Apollo Hospitals|Healthcare|APOLLOHOSP.NS\n' +
+'APOLLOMIC|Apollo Micro Systems|Defence|APOLLOMIC.NS\n' +
+'APOLLOTYRE|Apollo Tyres|Auto Ancillary|APOLLOTYRE.NS\n' +
+'APTUS|Aptus Value Housing|NBFC|APTUS.NS\n' +
+'ASHOKLEY|Ashok Leyland|Auto|ASHOKLEY.NS\n' +
+'ASIANPAINT|Asian Paints|Consumer|ASIANPAINT.NS\n' +
+'ASTRAMICRO|Astra Microwave Products|Defence|ASTRAMICRO.NS\n' +
+'ASTRAL|Astral|Plastics|ASTRAL.NS\n' +
+'ATGL|Adani Total Gas|Gas Distribution|ATGL.NS\n' +
+'AUBANK|AU Small Finance Bank|Banking|AUBANK.NS\n' +
+'AUROPHARMA|Aurobindo Pharma|Pharma|AUROPHARMA.NS\n' +
+'AXISBANK|Axis Bank|Banking|AXISBANK.NS\n' +
+'BAJAJ-AUTO|Bajaj Auto|Auto|BAJAJ-AUTO.NS\n' +
+'BAJAJFINSV|Bajaj Finserv|Financial Services|BAJAJFINSV.NS\n' +
+'BAJAJHFL|Bajaj Housing Finance|Housing Finance|BAJAJHFL.NS\n' +
+'BAJFINANCE|Bajaj Finance|NBFC|BAJFINANCE.NS\n' +
+'BALRAMCHIN|Balrampur Chini|Sugar|BALRAMCHIN.NS\n' +
+'BANDHANBNK|Bandhan Bank|Banking|BANDHANBNK.NS\n' +
+'BANKBARODA|Bank of Baroda|Banking/PSU|BANKBARODA.NS\n' +
+'BATAINDIA|Bata India|Consumer|BATAINDIA.NS\n' +
+'BDL|Bharat Dynamics|Defence|BDL.NS\n' +
+'BEL|Bharat Electronics|Defence|BEL.NS\n' +
+'BEML|BEML|Defence|BEML.NS\n' +
+'BHARATFORG|Bharat Forge|Auto Ancillary|BHARATFORG.NS\n' +
+'BHARTIARTL|Bharti Airtel|Telecom|BHARTIARTL.NS\n' +
+'BHEL|Bharat Heavy Electricals|Power/Defence|BHEL.NS\n' +
+'BIKAJI|Bikaji Foods|FMCG|BIKAJI.NS\n' +
+'BIOCON|Biocon|Pharma|BIOCON.NS\n' +
+'BOSCHLTD|Bosch|Auto Ancillary|BOSCHLTD.NS\n' +
+'BPCL|Bharat Petroleum|Oil & Gas/PSU|BPCL.NS\n' +
+'BRIGADE|Brigade Enterprises|Realty|BRIGADE.NS\n' +
+'BRITANNIA|Britannia Industries|FMCG|BRITANNIA.NS\n' +
+'BSE|BSE|Financial Services|BSE.NS\n' +
+'CAMS|CAMS|Financial Services|CAMS.NS\n' +
+'CANBK|Canara Bank|Banking/PSU|CANBK.NS\n' +
+'CANFINHOME|Can Fin Homes|Housing Finance|CANFINHOME.NS\n' +
+'CDSL|CDSL|Financial Services|CDSL.NS\n' +
+'CEATLTD|CEAT|Auto Ancillary|CEATLTD.NS\n' +
+'CENTRALBK|Central Bank of India|Banking/PSU|CENTRALBK.NS\n' +
+'CENTURYPLY|Century Plyboards|Building Materials|CENTURYPLY.NS\n' +
+'CENTURYTEX|Century Textiles|Textile|CENTURYTEX.NS\n' +
+'CESC|CESC|Power|CESC.NS\n' +
+'CGPOWER|CG Power & Industrial|Industrial|CGPOWER.NS\n' +
+'CHALET|Chalet Hotels|Hospitality|CHALET.NS\n' +
+'CHOLAFIN|Cholamandalam Investment|NBFC|CHOLAFIN.NS\n' +
+'CIPLA|Cipla|Pharma|CIPLA.NS\n' +
+'COALINDIA|Coal India|Mining|COALINDIA.NS\n' +
+'COCHINSHIP|Cochin Shipyard|Defence|COCHINSHIP.NS\n' +
+'COFORGE|Coforge|IT|COFORGE.NS\n' +
+'COLPAL|Colgate-Palmolive India|FMCG|COLPAL.NS\n' +
+'CONCOR|Container Corp of India|Logistics/PSU|CONCOR.NS\n' +
+'CRISIL|CRISIL|Financial Services|CRISIL.NS\n' +
+'CUB|City Union Bank|Banking|CUB.NS\n' +
+'CUMMINSIND|Cummins India|Industrial Machinery|CUMMINSIND.NS\n' +
+'CYIENT|Cyient|IT|CYIENT.NS\n' +
+'DABUR|Dabur India|FMCG|DABUR.NS\n' +
+'DATAPATTNS|Data Patterns India|Defence|DATAPATTNS.NS\n' +
+'DCXINDIA|DCX Systems|Defence|DCXINDIA.NS\n' +
+'DEEPAKFERT|Deepak Fertilisers|Chemicals|DEEPAKFERT.NS\n' +
+'DELHIVERY|Delhivery|Logistics|DELHIVERY.NS\n' +
+'DIVISLAB|Divi\'s Laboratories|Pharma|DIVISLAB.NS\n' +
+'DIXON|Dixon Technologies|Electronics|DIXON.NS\n' +
+'DLF|DLF|Realty|DLF.NS\n' +
+'DMART|Avenue Supermarts (DMart)|Retail|DMART.NS\n' +
+'DRREDDY|Dr. Reddy\'s Laboratories|Pharma|DRREDDY.NS\n' +
+'EICHERMOT|Eicher Motors|Auto|EICHERMOT.NS\n' +
+'ELGIEQUIP|Elgi Equipments|Industrial|ELGIEQUIP.NS\n' +
+'EMAMILTD|Emami|FMCG|EMAMILTD.NS\n' +
+'ENDURANCE|Endurance Technologies|Auto Ancillary|ENDURANCE.NS\n' +
+'ENGINERSIN|Engineers India|Consulting/PSU|ENGINERSIN.NS\n' +
+'EQUITASBNK|Equitas Small Finance Bank|Banking|EQUITASBNK.NS\n' +
+'ESCORTS|Escorts Kubota|Farm Equipment|ESCORTS.NS\n' +
+'EXIDEIND|Exide Industries|Auto Ancillary|EXIDEIND.NS\n' +
+'FEDERALBNK|Federal Bank|Banking|FEDERALBNK.NS\n' +
+'FINCABLES|Finolex Cables|Electrical|FINCABLES.NS\n' +
+'FIVESTAR|Five-Star Business Finance|NBFC|FIVESTAR.NS\n' +
+'FORTIS|Fortis Healthcare|Healthcare|FORTIS.NS\n' +
+'GAIL|GAIL India|Oil & Gas/PSU|GAIL.NS\n' +
+'GESHIP|Great Eastern Shipping|Shipping|GESHIP.NS\n' +
+'GLAND|Gland Pharma|Pharma|GLAND.NS\n' +
+'GLENMARK|Glenmark Pharmaceuticals|Pharma|GLENMARK.NS\n' +
+'GMRINFRA|GMR Airports Infrastructure|Infrastructure|GMRINFRA.NS\n' +
+'GNFC|GNFC|Chemicals|GNFC.NS\n' +
+'GODREJCP|Godrej Consumer Products|FMCG|GODREJCP.NS\n' +
+'GODREJIND|Godrej Industries|Diversified|GODREJIND.NS\n' +
+'GODREJPROP|Godrej Properties|Realty|GODREJPROP.NS\n' +
+'GRAPHITE|Graphite India|Metal|GRAPHITE.NS\n' +
+'GRASIM|Grasim Industries|Diversified|GRASIM.NS\n' +
+'GRINDWELL|Grindwell Norton|Industrial|GRINDWELL.NS\n' +
+'GRSE|Garden Reach Shipbuilders|Defence|GRSE.NS\n' +
+'GSPL|Gujarat State Petronet|Gas Distribution|GSPL.NS\n' +
+'GUJGASLTD|Gujarat Gas|Gas Distribution|GUJGASLTD.NS\n' +
+'HAL|Hindustan Aeronautics|Defence|HAL.NS\n' +
+'HAPPSTMNDS|Happiest Minds Technologies|IT|HAPPSTMNDS.NS\n' +
+'HAVELLS|Havells India|Electrical|HAVELLS.NS\n' +
+'HCLTECH|HCL Technologies|IT|HCLTECH.NS\n' +
+'HDFCAMC|HDFC AMC|Asset Management|HDFCAMC.NS\n' +
+'HDFCBANK|HDFC Bank|Banking|HDFCBANK.NS\n' +
+'HDFCLIFE|HDFC Life Insurance|Insurance|HDFCLIFE.NS\n' +
+'HEROMOTOCO|Hero MotoCorp|Auto|HEROMOTOCO.NS\n' +
+'HFCL|HFCL|Telecom|HFCL.NS\n' +
+'HINDALCO|Hindalco Industries|Metal|HINDALCO.NS\n' +
+'HINDPETRO|Hindustan Petroleum|Oil & Gas/PSU|HINDPETRO.NS\n' +
+'HINDUNILVR|Hindustan Unilever|FMCG|HINDUNILVR.NS\n' +
+'HUDCO|HUDCO|NBFC/PSU|HUDCO.NS\n' +
+'ICICIBANK|ICICI Bank|Banking|ICICIBANK.NS\n' +
+'ICICIPRULI|ICICI Prudential Life|Insurance|ICICIPRULI.NS\n' +
+'IDEAFORGE|ideaForge Technology|Defence/Drone|IDEAFORGE.NS\n' +
+'IDFCFIRSTB|IDFC First Bank|Banking|IDFCFIRSTB.NS\n' +
+'IEX|Indian Energy Exchange|Financial Services|IEX.NS\n' +
+'IGL|Indraprastha Gas|Gas Distribution|IGL.NS\n' +
+'IIFL|IIFL Finance|NBFC|IIFL.NS\n' +
+'INDHOTEL|Indian Hotels Company|Hospitality|INDHOTEL.NS\n' +
+'INDIANB|Indian Bank|Banking/PSU|INDIANB.NS\n' +
+'INDIGO|IndiGo (InterGlobe Aviation)|Aviation|INDIGO.NS\n' +
+'INDUSINDBK|IndusInd Bank|Banking|INDUSINDBK.NS\n' +
+'INDUSTOWER|Indus Towers|Telecom Infra|INDUSTOWER.NS\n' +
+'INFY|Infosys|IT|INFY.NS\n' +
+'INTELLECT|Intellect Design Arena|IT|INTELLECT.NS\n' +
+'IOB|Indian Overseas Bank|Banking/PSU|IOB.NS\n' +
+'IOC|Indian Oil Corporation|Oil & Gas/PSU|IOC.NS\n' +
+'IPCALAB|IPCA Laboratories|Pharma|IPCALAB.NS\n' +
+'IRCON|IRCON International|Infrastructure/PSU|IRCON.NS\n' +
+'IRCTC|Indian Railway Catering|Services/PSU|IRCTC.NS\n' +
+'IREDA|IREDA|NBFC/PSU|IREDA.NS\n' +
+'IRFC|Indian Railway Finance Corp|NBFC/PSU|IRFC.NS\n' +
+'ITC|ITC|FMCG|ITC.NS\n' +
+'JINDALSTEL|Jindal Steel & Power|Metal|JINDALSTEL.NS\n' +
+'JKCEMENT|JK Cement|Cement|JKCEMENT.NS\n' +
+'JSL|Jindal Stainless|Metal|JSL.NS\n' +
+'JSWENERGY|JSW Energy|Power|JSWENERGY.NS\n' +
+'JSWSTEEL|JSW Steel|Metal|JSWSTEEL.NS\n' +
+'JUBLFOOD|Jubilant FoodWorks|Consumer|JUBLFOOD.NS\n' +
+'JUSTDIAL|Just Dial|Internet|JUSTDIAL.NS\n' +
+'JYOTHYLAB|Jyothy Labs|FMCG|JYOTHYLAB.NS\n' +
+'KAJARIACER|Kajaria Ceramics|Building Materials|KAJARIACER.NS\n' +
+'KALYANKJIL|Kalyan Jewellers|Jewellery|KALYANKJIL.NS\n' +
+'KAYNES|Kaynes Technology|Electronics|KAYNES.NS\n' +
+'KIMS|KIMS|Healthcare|KIMS.NS\n' +
+'KIRLOSENG|Kirloskar Oil Engines|Industrial Machinery|KIRLOSENG.NS\n' +
+'KNRCON|KNR Constructions|Infrastructure|KNRCON.NS\n' +
+'KOTAKBANK|Kotak Mahindra Bank|Banking|KOTAKBANK.NS\n' +
+'KPITTECH|KPIT Technologies|IT|KPITTECH.NS\n' +
+'LALPATHLAB|Dr Lal PathLabs|Diagnostics|LALPATHLAB.NS\n' +
+'LAURUSLABS|Laurus Labs|Pharma|LAURUSLABS.NS\n' +
+'LICHSGFIN|LIC Housing Finance|Housing Finance|LICHSGFIN.NS\n' +
+'LICI|Life Insurance Corp (LIC)|Insurance/PSU|LICI.NS\n' +
+'LT|Larsen & Toubro|Infrastructure|LT.NS\n' +
+'LTIM|LTIMindtree|IT|LTIM.NS\n' +
+'LTTS|L&T Technology Services|IT|LTTS.NS\n' +
+'LUPIN|Lupin|Pharma|LUPIN.NS\n' +
+'M&M|Mahindra & Mahindra|Auto|M&M.NS\n' +
+'MAHABANK|Bank of Maharashtra|Banking/PSU|MAHABANK.NS\n' +
+'MANAPPURAM|Manappuram Finance|NBFC|MANAPPURAM.NS\n' +
+'MANKIND|Mankind Pharma|Pharma|MANKIND.NS\n' +
+'MARICO|Marico|FMCG|MARICO.NS\n' +
+'MARUTI|Maruti Suzuki|Auto|MARUTI.NS\n' +
+'MASTEK|Mastek|IT|MASTEK.NS\n' +
+'MAXHEALTH|Max Healthcare|Healthcare|MAXHEALTH.NS\n' +
+'MAZAGON|Mazagon Dock Shipbuilders|Defence|MAZDOCK.NS\n' +
+'MCX|Multi Commodity Exchange|Financial Services|MCX.NS\n' +
+'MEDANTA|Global Health (Medanta)|Healthcare|MEDANTA.NS\n' +
+'METROPOLIS|Metropolis Healthcare|Diagnostics|METROPOLIS.NS\n' +
+'MFSL|Max Financial Services|Insurance|MFSL.NS\n' +
+'MGL|Mahanagar Gas|Gas Distribution|MGL.NS\n' +
+'MIDHANI|Mishra Dhatu Nigam|Defence|MIDHANI.NS\n' +
+'MOIL|MOIL|Mining/PSU|MOIL.NS\n' +
+'MOTHERSON|Samvardhana Motherson|Auto Ancillary|MOTHERSON.NS\n' +
+'MPHASIS|Mphasis|IT|MPHASIS.NS\n' +
+'MTAR|MTAR Technologies|Defence/Space|MTAR.NS\n' +
+'MUTHOOTFIN|Muthoot Finance|NBFC|MUTHOOTFIN.NS\n' +
+'NATCOPHARM|Natco Pharma|Pharma|NATCOPHARM.NS\n' +
+'NATIONALUM|National Aluminium|Metal/PSU|NATIONALUM.NS\n' +
+'NAUKRI|Info Edge (India)|Internet|NAUKRI.NS\n' +
+'NAVINFLUOR|Navin Fluorine|Chemicals|NAVINFLUOR.NS\n' +
+'NCC|NCC|Infrastructure|NCC.NS\n' +
+'NESTLEIND|Nestle India|FMCG|NESTLEIND.NS\n' +
+'NHPC|NHPC|Power/PSU|NHPC.NS\n' +
+'NLC|NLC India|Power/PSU|NLC.NS\n' +
+'NMDC|NMDC|Mining/PSU|NMDC.NS\n' +
+'NTPC|NTPC|Power|NTPC.NS\n' +
+'NYKAA|FSN E-Commerce (Nykaa)|Consumer Tech|NYKAA.NS\n' +
+'OBEROIRLTY|Oberoi Realty|Realty|OBEROIRLTY.NS\n' +
+'OFSS|Oracle Financial Services|IT|OFSS.NS\n' +
+'OLECTRA|Olectra Greentech|EV/Bus|OLECTRA.NS\n' +
+'ONGC|Oil & Natural Gas Corp|Oil & Gas|ONGC.NS\n' +
+'PAGEIND|Page Industries|Textile|PAGEIND.NS\n' +
+'PARAS|Paras Defence & Space|Defence|PARAS.NS\n' +
+'PERSISTENT|Persistent Systems|IT|PERSISTENT.NS\n' +
+'PETRONET|Petronet LNG|Oil & Gas|PETRONET.NS\n' +
+'PHOENIXLTD|Phoenix Mills|Realty|PHOENIXLTD.NS\n' +
+'PIIND|PI Industries|Agrochem|PIIND.NS\n' +
+'PNB|Punjab National Bank|Banking/PSU|PNB.NS\n' +
+'POLICYBZR|PB Fintech (Policybazaar)|Fintech|POLICYBZR.NS\n' +
+'POLYCAB|Polycab India|Electrical|POLYCAB.NS\n' +
+'POONAWALLA|Poonawalla Fincorp|NBFC|POONAWALLA.NS\n' +
+'POWERGRID|Power Grid Corp|Power/PSU|POWERGRID.NS\n' +
+'PRESTIGE|Prestige Estates|Realty|PRESTIGE.NS\n' +
+'RADICO|Radico Khaitan|Beverages|RADICO.NS\n' +
+'RECLTD|REC|NBFC/PSU|RECLTD.NS\n' +
+'RELIANCE|Reliance Industries|Energy|RELIANCE.NS\n' +
+'RVNL|Rail Vikas Nigam|Infrastructure/PSU|RVNL.NS\n' +
+'SAFARI|Safari Industries|Consumer|SAFARI.NS\n' +
+'SAIL|Steel Authority of India|Metal/PSU|SAIL.NS\n' +
+'SBICARD|SBI Cards & Payment|Financial Services|SBICARD.NS\n' +
+'SBILIFE|SBI Life Insurance|Insurance|SBILIFE.NS\n' +
+'SBIN|State Bank of India|Banking|SBIN.NS\n' +
+'SHREECEM|Shree Cement|Cement|SHREECEM.NS\n' +
+'SHRIRAMFIN|Shriram Finance|NBFC|SHRIRAMFIN.NS\n' +
+'SIEMENS|Siemens|Industrial|SIEMENS.NS\n' +
+'SJVN|SJVN|Power/PSU|SJVN.NS\n' +
+'SOBHA|Sobha|Realty|SOBHA.NS\n' +
+'SOLARINDS|Solar Industries India|Defence/Explosive|SOLARINDS.NS\n' +
+'SONACOMS|Sona BLW Precision Forgings|Auto Ancillary|SONACOMS.NS\n' +
+'SUNDARMFIN|Sundaram Finance|NBFC|SUNDARMFIN.NS\n' +
+'SUNPHARMA|Sun Pharma|Pharma|SUNPHARMA.NS\n' +
+'SUPREMEIND|Supreme Industries|Plastics|SUPREMEIND.NS\n' +
+'SURYAROSNI|Surya Roshni|Electrical|SURYAROSNI.NS\n' +
+'SYNGENE|Syngene International|Pharma/CRO|SYNGENE.NS\n' +
+'TATACOMM|Tata Communications|Telecom|TATACOMM.NS\n' +
+'TATACONSUM|Tata Consumer Products|FMCG|TATACONSUM.NS\n' +
+'TATAELXSI|Tata Elxsi|IT|TATAELXSI.NS\n' +
+'TATAMOTORS|Tata Motors|Auto|TATAMOTORS.NS\n' +
+'TATAPOWER|Tata Power|Power|TATAPOWER.NS\n' +
+'TATASTEEL|Tata Steel|Metal|TATASTEEL.NS\n' +
+'TCS|Tata Consultancy Services|IT|TCS.NS\n' +
+'TECHM|Tech Mahindra|IT|TECHM.NS\n' +
+'THERMAX|Thermax|Industrial|THERMAX.NS\n' +
+'TIINDIA|Tube Investments of India|Auto Ancillary|TIINDIA.NS\n' +
+'TITAN|Titan Company|Consumer|TITAN.NS\n' +
+'TORNTPHARM|Torrent Pharmaceuticals|Pharma|TORNTPHARM.NS\n' +
+'TORNTPOWER|Torrent Power|Power|TORNTPOWER.NS\n' +
+'TRENT|Trent|Retail|TRENT.NS\n' +
+'TRIDENT|Trident|Textile|TRIDENT.NS\n' +
+'UCOBANK|UCO Bank|Banking/PSU|UCOBANK.NS\n' +
+'UJJIVANSFB|Ujjivan Small Finance Bank|Banking|UJJIVANSFB.NS\n' +
+'ULTRACEMCO|UltraTech Cement|Cement|ULTRACEMCO.NS\n' +
+'UNIONBANK|Union Bank of India|Banking/PSU|UNIONBANK.NS\n' +
+'UNITDSPR|United Spirits|Beverages|UNITDSPR.NS\n' +
+'UNOMINDA|Uno Minda|Auto Ancillary|UNOMINDA.NS\n' +
+'UPL|UPL|Agrochem|UPL.NS\n' +
+'VBL|Varun Beverages|FMCG|VBL.NS\n' +
+'VEDL|Vedanta|Metal|VEDL.NS\n' +
+'VGUARD|V-Guard Industries|Electrical|VGUARD.NS\n' +
+'VOLTAS|Voltas|Consumer Durables|VOLTAS.NS\n' +
+'WELCORP|Welspun Corp|Metal|WELCORP.NS\n' +
+'WELSPUNLIV|Welspun Living|Textile|WELSPUNLIV.NS\n' +
+'WIPRO|Wipro|IT|WIPRO.NS\n' +
+'YESBANK|Yes Bank|Banking|YESBANK.NS\n' +
+'ZEEL|Zee Entertainment|Media|ZEEL.NS\n' +
+'ZENSARTECH|Zensar Technologies|IT|ZENSARTECH.NS\n' +
+'ZENTEC|Zen Technologies|Defence|ZENTEC.NS\n' +
+'ZOMATO|Zomato|Consumer Tech|ZOMATO.NS\n' +
+'ZYDUSLIFE|Zydus Lifesciences|Pharma|ZYDUSLIFE.NS\n' +
+'ADANIGAS|Adani Gas (ATGL)|Gas Distribution|ATGL.NS\n' +
+'AFFLE|Affle India|Ad Tech|AFFLE.NS\n' +
+'AKZOINDIA|Akzo Nobel India|Paints|AKZOINDIA.NS\n' +
+'ALKYLAMINE|Alkyl Amines Chemicals|Chemicals|ALKYLAMINE.NS\n' +
+'ALOKTEXT|Alok Industries|Textile|ALOKTEXT.NS\n' +
+'AMBER|Amber Enterprises|Electronics|AMBER.NS\n' +
+'ANURAS|Anurag Rubber|Industrial|ANURAS.NS\n' +
+'APARINDS|Apar Industries|Electrical|APARINDS.NS\n' +
+'ARCHIES|Archies|Consumer|ARCHIES.NS\n' +
+'ASAHIINDIA|Asahi India Glass|Auto Ancillary|ASAHIINDIA.NS\n' +
+'ASHOKA|Ashoka Buildcon|Infrastructure|ASHOKA.NS\n' +
+'ASTRAZEN|AstraZeneca Pharma|Pharma|ASTRAZEN.NS\n' +
+'AVANTIFEED|Avanti Feeds|Aquaculture|AVANTIFEED.NS\n' +
+'BCG|Bengal & Assam Company|Diversified|BCG.NS\n' +
+'BERGEPAINT|Berger Paints|Paints|BERGEPAINT.NS\n' +
+'BLUESTARCO|Blue Star|Consumer Durables|BLUESTARCO.NS\n' +
+'BOROLT|Borosil|Consumer|BOROLT.NS\n' +
+'CANTABIL|Cantabil Retail India|Retail|CANTABIL.NS\n' +
+'CARBORUNIV|Carborundum Universal|Industrial|CARBORUNIV.NS\n' +
+'CARTRADE|CarTrade Tech|Internet|CARTRADE.NS\n' +
+'CASTROLIND|Castrol India|Lubricants|CASTROLIND.NS\n' +
+'CCL|CCL Products India|FMCG|CCL.NS\n' +
+'CERA|Cera Sanitaryware|Building Materials|CERA.NS\n' +
+'CHAMBLFERT|Chambal Fertilisers|Chemicals|CHAMBLFERT.NS\n' +
+'CHEMPLASTS|Chemplast Sanmar|Chemicals|CHEMPLASTS.NS\n' +
+'CLEAN|Clean Science Technology|Chemicals|CLEAN.NS\n' +
+'COMPUSOFT|Compusoft|IT|COMPUSOFT.NS\n' +
+'CROMPTON|Crompton Greaves Consumer|Consumer Durables|CROMPTON.NS\n' +
+'CSBBANK|CSB Bank|Banking|CSBBANK.NS\n' +
+'DATAMATICS|Datamatics Global Services|IT|DATAMATICS.NS\n' +
+'DBREALTY|D B Realty|Realty|DBREALTY.NS\n' +
+'DCBBANK|DCB Bank|Banking|DCBBANK.NS\n' +
+'DEEPAKNTR|Deepak Nitrite|Chemicals|DEEPAKNTR.NS\n' +
+'DELTACORP|Delta Corp|Entertainment|DELTACORP.NS\n' +
+'DODLA|Dodla Dairy|FMCG|DODLA.NS\n' +
+'EDELWEISS|Edelweiss Financial|Financial Services|EDELWEISS.NS\n' +
+'ENIL|Entertainment Network India|Media|ENIL.NS\n' +
+'EMCURE|Emcure Pharmaceuticals|Pharma|EMCURE.NS\n' +
+'EQUITAS|Equitas Holdings|Financial Services|EQUITAS.NS\n' +
+'ESABINDIA|ESAB India|Industrial|ESABINDIA.NS\n' +
+'FINEORG|Fine Organic Industries|Chemicals|FINEORG.NS\n' +
+'FLUOROCHEM|Gujarat Fluorochemicals|Chemicals|FLUOROCHEM.NS\n' +
+'GAEL|Gujarat Ambuja Exports|Agri|GAEL.NS\n' +
+'GALLANTT|Gallantt Ispat|Metal|GALLANTT.NS\n' +
+'GATEWAY|Gateway Distriparks|Logistics|GATEWAY.NS\n' +
+'GICRE|General Insurance Corp|Insurance|GICRE.NS\n' +
+'GIPCL|Gujarat Industries Power|Power|GIPCL.NS\n' +
+'GLAXO|GSK Pharmaceuticals|Pharma|GLAXO.NS\n' +
+'GPPL|Gujarat Pipavav Port|Logistics|GPPL.NS\n' +
+'HAPPYFORGE|Happy Forgings|Auto Ancillary|HAPPYFORGE.NS\n' +
+'HEG|HEG|Metal|HEG.NS\n' +
+'HIMATSEIDE|Himatsingka Seide|Textile|HIMATSEIDE.NS\n' +
+'HINDCOPPER|Hindustan Copper|Metal|HINDCOPPER.NS\n' +
+'IBULHSGFIN|Indiabulls Housing Finance|Housing Finance|IBULHSGFIN.NS\n' +
+'ICICLOMBRD|ICICI Lombard GIC|Insurance|ICICLOMBRD.NS\n' +
+'IFBIND|IFB Industries|Consumer Durables|IFBIND.NS\n' +
+'IGPL|IG Petrochemicals|Chemicals|IGPL.NS\n' +
+'INDIAMART|IndiaMart InterMesh|Internet|INDIAMART.NS\n' +
+'INDIGOPNTS|Indigo Paints|Paints|INDIGOPNTS.NS\n' +
+'INOXGREEN|INOX Green Energy|Renewable Energy|INOXGREEN.NS\n' +
+'ION|ION Exchange|Chemicals|ION.NS\n' +
+'JTEKTINDIA|JTEKT India|Auto Ancillary|JTEKTINDIA.NS\n' +
+'JUBLINGREA|Jubilant Ingrevia|Chemicals|JUBLINGREA.NS\n' +
+'KANSAINER|Kansai Nerolac Paints|Paints|KANSAINER.NS\n' +
+'KARTIKAYS|Kartik|Chemicals|KARTIKAYS.NS\n' +
+'KEEI|KEI Industries|Electrical|KEI.NS\n' +
+'KEILTD|KEI Industries|Electrical|KEI.NS\n' +
+'KEI|KEI Industries|Electrical|KEI.NS\n' +
+'KENNAMETAL|Kennametal India|Industrial|KENNAMETAL.NS\n' +
+'KMSUGAR|KM Sugar Mills|Sugar|KMSUGAR.NS\n' +
+'KRBL|KRBL (India Gate Rice)|FMCG|KRBL.NS\n' +
+'KSCL|Kaveri Seed Company|Agri|KSCL.NS\n' +
+'LATENTVIEW|LatentView Analytics|IT|LATENTVIEW.NS\n' +
+'LAXMIMACH|Lakshmi Machine Works|Industrial|LAXMIMACH.NS\n' +
+'LINDEINDIA|Linde India|Industrial Gases|LINDEINDIA.NS\n' +
+'LLOYDSME|Lloyds Metals & Energy|Metal|LLOYDSME.NS\n' +
+'LODHA|Lodha (Macrotech Dev)|Realty|MACROTECH.NS\n' +
+'MAHSCOOTER|Maharashtra Scooters|Auto|MAHSCOOTER.NS\n' +
+'MAHSEAMLES|Maharashtra Seamless|Metal|MAHSEAMLES.NS\n' +
+'MASFIN|MAS Financial Services|NBFC|MASFIN.NS\n' +
+'MAXESTATES|Max Estates|Realty|MAXESTATES.NS\n' +
+'MEDPLUS|Medplus Health Services|Healthcare Retail|MEDPLUS.NS\n' +
+'METROBRAND|Metro Brands|Retail|METROBRAND.NS\n' +
+'MMTC|MMTC|Trading/PSU|MMTC.NS\n' +
+'MOLDTKPAC|Mold-Tek Packaging|Packaging|MOLDTKPAC.NS\n' +
+'MUKKA|Mukka Proteins|Aquaculture|MUKKA.NS\n' +
+'MUTHOOTMF|Muthoot Microfin|NBFC|MUTHOOTMF.NS\n' +
+'NACLIND|NACL Industries|Agrochem|NACLIND.NS\n' +
+'NAVNETEDUL|Navneet Education|Education|NAVNETEDUL.NS\n' +
+'NAYARA|Nayara Energy (Essar Oil)|Oil & Gas|NAYARA.NS\n' +
+'NESCO|NESCO|Exhibitions|NESCO.NS\n' +
+'NETWORK18|Network18 Media|Media|NETWORK18.NS\n' +
+'NIACL|New India Assurance|Insurance/PSU|NIACL.NS\n' +
+'NOCIL|NOCIL|Chemicals|NOCIL.NS\n' +
+'NSLNISP|Nuvoco Vistas|Cement|NUVOCO.NS\n' +
+'NUVOCO|Nuvoco Vistas|Cement|NUVOCO.NS\n' +
+'OLAELEC|Ola Electric Mobility|EV|OLAELEC.NS\n' +
+'ONCOSIL|OncoSil Medical|Medical Devices|ONCOSIL.NS\n' +
+'OPTIEMUS|Optiemus Infracom|Telecom|OPTIEMUS.NS\n' +
+'PGHH|P&G Hygiene & Health|FMCG|PGHH.NS\n' +
+'PFC|Power Finance Corp|NBFC/PSU|PFC.NS\n' +
+'PFIZER|Pfizer|Pharma|PFIZER.NS\n' +
+'PHILIPCARB|Phillips Carbon Black|Chemicals|PHILIPCARB.NS\n' +
+'PIDILITIND|Pidilite Industries|Adhesives|PIDILITIND.NS\n' +
+'PILANIINVS|Pilani Investment|Investment|PILANIINVS.NS\n' +
+'PILOTSQUAD|Pilot Industries|Industrial|PILOTSQUAD.NS\n' +
+'PNBHOUSING|PNB Housing Finance|Housing Finance|PNBHOUSING.NS\n' +
+'POKARNA|Pokarna|Building Materials|POKARNA.NS\n' +
+'POLPHARMA|Poly Medicure|Medical Devices|POLMED.NS\n' +
+'PRAXIS|Praxis Home Retail|Retail|PRAXIS.NS\n' +
+'PRICOL|Pricol|Auto Ancillary|PRICOL.NS\n' +
+'PRINCEPIPE|Prince Pipes & Fittings|Plastics|PRINCEPIPE.NS\n' +
+'PRISM|Prism Johnson|Cement|PRISMJOHNS.NS\n' +
+'PVRINOX|PVR INOX|Entertainment|PVRINOX.NS\n' +
+'RITES|RITES|Infrastructure/PSU|RITES.NS\n' +
+'RPGLIFE|RPG Life Sciences|Pharma|RPGLIFE.NS\n' +
+'RTNPOWER|Rattanindia Power|Power|RTNPOWER.NS\n' +
+'SAKSOFT|Saksoft|IT|SAKSOFT.NS\n' +
+'SANOFI|Sanofi India|Pharma|SANOFI.NS\n' +
+'SAPPHIRE|Sapphire Foods|QSR|SAPPHIRE.NS\n' +
+'SAREGAMA|Saregama India|Media|SAREGAMA.NS\n' +
+'SARDAEN|Sarda Energy & Minerals|Metal|SARDAEN.NS\n' +
+'SCI|Shipping Corp of India|Shipping/PSU|SCI.NS\n' +
+'SENCO|Senco Gold|Jewellery|SENCO.NS\n' +
+'SEQUENT|Sequent Scientific|Pharma|SEQUENT.NS\n' +
+'SHARDAMOTR|Sharda Motor Industries|Auto Ancillary|SHARDAMOTR.NS\n' +
+'SHAREINDIA|Share India Securities|Broking|SHAREINDIA.NS\n' +
+'SHOPERSTOP|Shoppers Stop|Retail|SHOPERSTOP.NS\n' +
+'SHYAMMETL|Shyam Metalics & Energy|Metal|SHYAMMETL.NS\n' +
+'SKIPPER|Skipper|Electrical|SKIPPER.NS\n' +
+'SMLISUZU|SML Isuzu|Auto|SMLISUZU.NS\n' +
+'SOLARA|Solara Active Pharma|Pharma|SOLARA.NS\n' +
+'SPARC|Sun Pharma Advanced Research|Pharma|SPARC.NS\n' +
+'STARCEMENT|Star Cement|Cement|STARCEMENT.NS\n' +
+'STLTECH|Sterlite Technologies|Telecom Infra|STLTECH.NS\n' +
+'SUBROS|Subros|Auto Ancillary|SUBROS.NS\n' +
+'SUMICHEM|Sumitomo Chemical India|Agrochem|SUMICHEM.NS\n' +
+'SUNTECK|Sunteck Realty|Realty|SUNTECK.NS\n' +
+'SURYODAY|Suryoday Small Finance Bank|Banking|SURYODAY.NS\n' +
+'SUTLEJTEX|Sutlej Textiles|Textile|SUTLEJTEX.NS\n' +
+'SWSOLAR|Sterling & Wilson Renewable|Renewable Energy|SWSOLAR.NS\n' +
+'SYMPHONY|Symphony|Consumer Durables|SYMPHONY.NS\n' +
+'TAKE|Take Solutions|IT|TAKE.NS\n' +
+'TANLA|Tanla Platforms|IT|TANLA.NS\n' +
+'TASTYBITE|Tasty Bite Eatables|FMCG|TASTYBITE.NS\n' +
+'TBOTEK|TBO Tek|Internet|TBOTEK.NS\n' +
+'THANGAMAYL|Thangamayil Jewellery|Jewellery|THANGAMAYL.NS\n' +
+'THYROCARE|Thyrocare Technologies|Diagnostics|THYROCARE.NS\n' +
+'TIMETECHNO|Time Technoplast|Plastics|TIMETECHNO.NS\n' +
+'TIPSINDLTD|Tips Industries|Media|TIPSINDLTD.NS\n' +
+'TTML|Tata Teleservices Maharashtra|Telecom|TTML.NS\n' +
+'TV18BRDCST|TV18 Broadcast|Media|TV18BRDCST.NS\n' +
+'TVSL|TVS Logistics Services|Logistics|TVSL.NS\n' +
+'TVSSCS|TVS Supply Chain Solutions|Logistics|TVSSCS.NS\n' +
+'TVSMOTOR|TVS Motor Company|Auto|TVSMOTOR.NS\n' +
+'UJJIVAN|Ujjivan Financial Services|Financial Services|UJJIVAN.NS\n' +
+'UTIAMC|UTI AMC|Asset Management|UTIAMC.NS\n' +
+'VAIBHAVGBL|Vaibhav Global|Retail/Gems|VAIBHAVGBL.NS\n' +
+'VARUNBEV|Varun Beverages|FMCG|VBL.NS\n' +
+'VENKEYS|Venky\'s (India)|Poultry|VENKEYS.NS\n' +
+'VIJAYA|Vijaya Diagnostic Centre|Healthcare|VIJAYA.NS\n' +
+'VSTTILLERS|V.S.T Tillers Tractors|Farm Equipment|VSTTILLERS.NS\n' +
+'VSTIND|VST Industries|FMCG|VSTIND.NS\n' +
+'WABAG|VA Tech Wabag|Infrastructure|WABAG.NS\n' +
+'WELSPUNIND|Welspun India|Textile|WELSPUNIND.NS\n' +
+'WENDT|Wendt (India)|Industrial|WENDT.NS\n' +
+'WHIRLPOOL|Whirlpool of India|Consumer Durables|WHIRLPOOL.NS\n' +
+'XCHANGING|Xchanging Solutions|IT|XCHANGING.NS';
