@@ -113,6 +113,12 @@ tr.row:hover{ background:#faf7ef; cursor:pointer; }
 .pfall.pf-lo{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
 tr.gated{ opacity:.58; }
 .sl-legend{ font-size:11px; color:var(--muted); background:#f5f1e7; border:1px solid var(--edge); border-radius:9px; padding:9px 12px; margin-top:12px; line-height:1.55; }
+/* ── sell calibration ── */
+.cb-cards{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:14px; }
+@media (max-width:760px){ .cb-cards{ grid-template-columns:repeat(2,1fr); } }
+.cb-card{ background:#f5f1e7; border:1px solid var(--edge); border-radius:9px; padding:10px 13px; }
+.cb-k{ font-size:11px; color:var(--muted); margin-bottom:3px; }
+.cb-v{ font-family:var(--mono); font-size:21px; font-weight:700; color:var(--ink); }
 </style>
 </head>
 <body>
@@ -132,6 +138,7 @@ tr.gated{ opacity:.58; }
   <div class="tab on" data-tab="pf">📁 Portfolio</div>
   <div class="tab" data-tab="radar">📡 Cross Radar</div>
   <div class="tab" data-tab="sell">📉 Sell Watch</div>
+  <div class="tab" data-tab="calib">🧭 Sell Calibration</div>
 </div>
 
 <div class="wrap">
@@ -216,6 +223,23 @@ tr.gated{ opacity:.58; }
     <div class="sl-legend"><b>How to read:</b> P(fall) is the share of this stock's history that fell over the next 21 sessions from the current stretch · <b>Lift</b> is P(fall) minus the stock's own base rate — only positive lift is a real edge · <b>MR</b> mean-reverting (sell valid), <b class="gd">TR · gated</b> trending (ADX suppresses the exit) · entry price is ignored throughout.</div>
   </div>
 
+  <!-- ═══════════ SELL CALIBRATION ═══════════ -->
+  <div class="panel" id="panel-calib">
+    <div class="status" id="cbStatus"></div>
+    <div class="cb-cards">
+      <div class="cb-card"><div class="cb-k">Brier (raw)</div><div class="cb-v" id="cbBrier">–</div></div>
+      <div class="cb-card"><div class="cb-k">Episodes scored</div><div class="cb-v" id="cbN">–</div></div>
+      <div class="cb-card"><div class="cb-k">Champion</div><div class="cb-v" id="cbChamp" style="font-size:15px">–</div></div>
+      <div class="cb-card"><div class="cb-k">Holdout Brier</div><div class="cb-v" id="cbHold">–</div></div>
+    </div>
+    <div class="board">
+      <h3>Reliability · predicted vs observed P(fall · 21d)</h3>
+      <svg id="cbSvg" viewBox="0 0 700 430" style="display:block;width:100%;height:auto"></svg>
+      <div class="showing" id="cbLegend"></div>
+    </div>
+    <div class="sl-legend" id="cbRead"><b>How to read:</b> each bubble is a prediction decile (size = episode count). On the dashed diagonal, the model is honest — a 60% call falls 60% of the time. Below the diagonal = overconfident. The gold line is the promoted champion map: what each raw probability is corrected to before display. Bubbles hugging the diagonal after correction is the goal.</div>
+  </div>
+
 </div>
 
 <script>
@@ -237,6 +261,7 @@ document.querySelectorAll('.tab').forEach(function(t){
     t.classList.add('on'); $('panel-'+t.dataset.tab).classList.add('on');
     if(t.dataset.tab==='radar' && !radarLoaded) loadRadar();
     if(t.dataset.tab==='sell') loadSell();
+    if(t.dataset.tab==='calib' && !calibLoaded) loadCalib();
   });
 });
 
@@ -655,6 +680,70 @@ function sellDiveBlock_(p){
     calNote=' <b style="color:var(--gold)">CALIBRATED '+pc+'%</b> — champion v'+s.calVer+' maps the raw '+pf+'% onto its historically observed frequency (this is the number to trust).';
   }
   return '<div class="verdict" style="border-color:'+(!s.gated&&lift>0?'#5a2b2b':'#26374f')+'">'+head+extra+calNote+trustNote+'</div>';
+}
+
+/* ══════════════ sell calibration panel ══════════════ */
+var calibLoaded=false;
+function loadCalib(){
+  $('cbStatus').textContent='loading calibration…';
+  J(API+'?action=calib').then(function(j){
+    calibLoaded=true;
+    if(!j.ok){ $('cbStatus').textContent='✗ '+(j.error||'failed'); $('cbStatus').className='status err'; return; }
+    var ch=j.champion;
+    $('cbChamp').textContent = ch? ('iso v'+ch.version) : 'none yet';
+    $('cbHold').textContent = ch&&ch.holdoutBrier!=null&&ch.holdoutBrier!==''? ch.holdoutBrier : '–';
+    if(!j.ready){ $('cbStatus').textContent=j.msg||'no scored results yet'; $('cbStatus').className='status err'; return; }
+    $('cbBrier').textContent=j.brier; $('cbN').textContent=Number(j.nScored).toLocaleString('en-IN');
+    $('cbStatus').textContent='scored '+j.scoredAt.slice(0,10)+' · '+(ch?'champion map applied to live Sell Watch':'run runCalibChampion() to fit the first map');
+    $('cbStatus').className='status';
+    drawCalib_(j.reliability, ch? ch.map : null);
+  }).catch(function(e){ $('cbStatus').textContent='✗ '+e.message; $('cbStatus').className='status err'; });
+}
+function drawCalib_(rel, map){
+  var svg=$('cbSvg'); svg.innerHTML='';
+  var W=700,H=430,L=64,R=24,T=22,B=52, iw=W-L-R, ih=H-T-B;
+  var bins=rel.filter(function(b){return b.n>=10 && b.predicted!=null;});
+  var skipped=rel.filter(function(b){return b.n>0 && b.n<10;}).reduce(function(a,b){return a+b.n;},0);
+  if(!bins.length){ $('cbLegend').textContent='no populated deciles'; return; }
+  var lo=Math.max(0,Math.min.apply(null,bins.map(function(b){return Math.min(b.predicted,b.observed);}))-0.06);
+  var hi=Math.min(1,Math.max.apply(null,bins.map(function(b){return Math.max(b.predicted,b.observed);}))+0.06);
+  function X(v){ return L+(v-lo)/(hi-lo)*iw; } function Y(v){ return T+ih-(v-lo)/(hi-lo)*ih; }
+  var NS='http://www.w3.org/2000/svg';
+  function el(t,a){ var e=document.createElementNS(NS,t); for(var k in a) e.setAttribute(k,a[k]); svg.appendChild(e); return e; }
+  function txt(x,y,s,a){ var e=el('text',Object.assign({x:x,y:y,'font-size':11,fill:'#8a8474','font-family':'ui-monospace,monospace'},a||{})); e.textContent=s; return e; }
+  // frame + gridlines + ticks
+  el('rect',{x:L,y:T,width:iw,height:ih,fill:'none',stroke:'#d8d2c2','stroke-width':1});
+  for(var g=Math.ceil(lo*10)/10; g<=hi+1e-9; g+=0.1){
+    g=Math.round(g*10)/10;
+    el('line',{x1:X(g),y1:T,x2:X(g),y2:T+ih,stroke:'#eee8d8','stroke-width':1});
+    el('line',{x1:L,y1:Y(g),x2:L+iw,y2:Y(g),stroke:'#eee8d8','stroke-width':1});
+    txt(X(g),T+ih+16,Math.round(g*100)+'%',{'text-anchor':'middle'});
+    txt(L-8,Y(g)+4,Math.round(g*100)+'%',{'text-anchor':'end'});
+  }
+  // perfect-calibration diagonal
+  el('line',{x1:X(lo),y1:Y(lo),x2:X(hi),y2:Y(hi),stroke:'#8a8474','stroke-width':1.5,'stroke-dasharray':'6 4'});
+  // champion map (gold)
+  if(map && map.length){
+    var pts=[[lo, mapAt_(map,lo)]].concat(map.filter(function(m){return m.x>=lo&&m.x<=hi;}).map(function(m){return [m.x,m.y];})).concat([[hi,mapAt_(map,hi)]]);
+    el('polyline',{points:pts.map(function(p){return X(p[0])+','+Y(Math.max(lo,Math.min(hi,p[1])));}).join(' '),fill:'none',stroke:'#e8b94a','stroke-width':2.5});
+  }
+  // decile bubbles + connecting line
+  el('polyline',{points:bins.map(function(b){return X(b.predicted)+','+Y(b.observed);}).join(' '),fill:'none',stroke:'#b0763a','stroke-width':1.2,opacity:0.55});
+  var maxN=Math.max.apply(null,bins.map(function(b){return b.n;}));
+  bins.forEach(function(b){
+    var r=Math.max(4, Math.sqrt(b.n/maxN)*24);
+    var over=b.observed < b.predicted-0.02;
+    el('circle',{cx:X(b.predicted),cy:Y(b.observed),r:r,fill:over?'#b0763a':'#4a7c59',opacity:0.72,stroke:'#7a5a28','stroke-width':1})
+      .appendChild((function(){var t=document.createElementNS(NS,'title');t.textContent=b.band+' · n='+b.n+' · predicted '+Math.round(b.predicted*100)+'% → fell '+Math.round(b.observed*100)+'%';return t;})());
+  });
+  txt(L+iw/2, H-8, 'predicted P(fall)', {'text-anchor':'middle',fill:'#6b6555'});
+  var yl=txt(0,0,'observed frequency',{'text-anchor':'middle',fill:'#6b6555'}); yl.setAttribute('transform','translate(16 '+(T+ih/2)+') rotate(-90)');
+  $('cbLegend').innerHTML='<span style="color:#b0763a">●</span> below diagonal = overconfident &nbsp; <span style="color:#4a7c59">●</span> on/above &nbsp; <span style="color:#e8b94a">━</span> champion correction'+(skipped?' &nbsp;·&nbsp; '+skipped+' episodes in sub-10-count deciles hidden':'');
+}
+function mapAt_(map,p){
+  if(p<=map[0].x) return map[0].y; if(p>=map[map.length-1].x) return map[map.length-1].y;
+  for(var i=1;i<map.length;i++){ if(p<=map[i].x){ var x0=map[i-1].x,x1=map[i].x,y0=map[i-1].y,y1=map[i].y,t=(x1-x0)?(p-x0)/(x1-x0):0; return y0+t*(y1-y0);} }
+  return map[map.length-1].y;
 }
 
 /* ══════════════ boot ══════════════ */
