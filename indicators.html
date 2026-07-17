@@ -115,7 +115,7 @@ tr.gated{ opacity:.58; }
 <header class="u-header">
   <a href="indicators.html" class="u-brand">NSE <span>Indicators</span></a>
   <span class="u-sub">Pre-cross radar · confirm on close</span>
-  <div class="u-right"><div class="live-dot"></div><span id="uClock">–</span><span style="color:#8fa1c2">IST</span></div>
+  <div class="u-right"><a href="https://anupamkrihna.github.io/nse-dashboard/" style="color:var(--gold);text-decoration:none;font-size:11px;letter-spacing:1px" title="NSE Pro main dashboard">↗ MAIN DASHBOARD</a><div class="live-dot"></div><span id="uClock">–</span><span style="color:#8fa1c2">IST</span></div>
 </header>
 
 <div class="tabs">
@@ -576,9 +576,12 @@ function sellRow(x){
       ? '<span class="gd">TR · gated</span>'
       : '<span>MR</span>'+(s.deathEta!=null?' · <span class="dn">death '+s.deathEta+'d</span>':' · <span class="mut">—</span>');
   var grade = s.grade ? '<span class="grade '+s.grade+'">'+s.grade+'</span>' : '—';
+  var flag = (!s.gated && s.trust==='low')
+    ? ' <span title="'+(s.thin?'thin sample (~'+s.effN+' independent episodes)':'')+((s.thin&&s.divergent)?' + ':'')+(s.divergent?'bootstrap disagrees':'')+' — grade capped" style="color:var(--goldD);cursor:help">⚠</span>'
+    : '';
   return '<tr class="row'+(s.gated?' gated':'')+'" data-sym="'+esc(x.sym)+'">'
     +'<td><span class="sym">'+esc(x.sym)+'</span><br><span class="mut">'+esc(x.sector||'')+'</span></td>'
-    +'<td><span class="pfall '+cls+'">'+p+'%</span></td>'
+    +'<td><span class="pfall '+cls+'">'+p+'%</span>'+flag+'</td>'
     +'<td class="'+liftCls+'">'+(lift>0?'+':'')+lift+'</td>'
     +'<td>'+tail+'</td>'
     +'<td style="font-size:11px">'+regime+'</td>'
@@ -627,8 +630,14 @@ function sellDiveBlock_(p){
   var extra = ' Tail P(&lt;−5%) <b>'+tail+'</b>.'
     + (boot!=null?' Bootstrap cross-check <b>'+boot+'%</b>.':'')
     + (s.deathEta!=null?' Death cross ≈<b>'+s.deathEta+'d</b>.':'')
-    + ' Sell grade <b>'+(s.grade||'—')+'</b>. <span style="color:#63769a">z='+s.z+' · n='+s.n+' · entry price ignored</span>';
-  return '<div class="verdict" style="border-color:'+(!s.gated&&lift>0?'#5a2b2b':'#26374f')+'">'+head+extra+'</div>';
+    + ' Sell grade <b>'+(s.grade||'—')+'</b>. <span style="color:#63769a">z='+s.z+' · n='+s.n+' · ~'+s.effN+' episodes · entry price ignored</span>';
+  var trustNote='';
+  if(!s.gated && s.trust==='low'){
+    var why=[]; if(s.thin) why.push('thin sample (only ~'+s.effN+' independent 21-day episodes)');
+    if(s.divergent) why.push('bootstrap disagrees ('+pf+'% conditional vs '+boot+'% resampled)');
+    trustNote=' <b class="gd">⚠ LOW TRUST</b> — '+why.join(' and ')+'; grade held at C rather than the headline figure.';
+  }
+  return '<div class="verdict" style="border-color:'+(!s.gated&&lift>0?'#5a2b2b':'#26374f')+'">'+head+extra+trustNote+'</div>';
 }
 
 /* ══════════════ boot ══════════════ */
