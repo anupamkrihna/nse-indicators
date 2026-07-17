@@ -42,7 +42,8 @@ var CFG = {
   SERIES_WINDOW: 220,        // bars returned to charts
   PRECROSS_LOOKBACK: 10,     // sessions for gap-slope regression
   HOT_DAYS: 15, WATCH_DAYS: 30,
-  SCAN_SHEET: 'Scan', PF_SHEET: 'Portfolios'
+  SCAN_SHEET: 'Scan', PF_SHEET: 'Portfolios',
+  CALIB_SHEET: 'Calib', CALIB_RESULTS_SHEET: 'CalibResults', CALIB_MATURE_DAYS: 32
 };
 
 /* ═══════════════ UNIVERSE (sym|name|sector|yfTicker) ═══════════════ */
@@ -363,6 +364,110 @@ function hazardsAndGrade(pack) {
   return { hazards: hz, grade: grade };
 }
 
+/* ═══════════════ SELL WATCH (v1.3 — additive, pure) ═══════════════
+   Statistical exit signal. Conditional forward-return distribution vs
+   the stock's own base rate; only positive lift is an edge. ADX-gated
+   (valid only when mean-reverting). Entry price never referenced.
+   v1.3 adds trust guards: effective-sample floor (overlapping windows
+   collapse to few real episodes) and a bootstrap-agreement cap, so a
+   thin or bootstrap-contradicted reading can't earn grade A/B.
+   Bootstrap is seeded per-series → grades reproducible run-to-run.   */
+var SELL = { H:21, N:100, BIN:0.5, MINBIN:40, TAIL:-0.05, BOOT_BLOCK:5, BOOT_ITERS:400, MIN_EFF_N:4, MAX_DIVERGE:0.15 };
+
+function sellMean_(a){ var s=0; for(var i=0;i<a.length;i++) s+=a[i]; return s/a.length; }
+function sellStd_(a){ var m=sellMean_(a),s=0; for(var i=0;i<a.length;i++){var d=a[i]-m; s+=d*d;} return Math.sqrt(s/a.length); }
+
+/* z-score of ln(price) vs trailing N window ending at idx (inclusive) */
+function sellExtZ_(close, N, idx){
+  if (idx < N-1) return 0;
+  var w=[]; for(var i=idx-N+1;i<=idx;i++) w.push(Math.log(close[i]));
+  var sd=sellStd_(w); return sd>0 ? (Math.log(close[idx])-sellMean_(w))/sd : 0;
+}
+
+/* conditional forward-return distribution — deterministic */
+function sellConditional_(close, H, N, bin, minBin, tailK){
+  var n=close.length;
+  if (n < N + H + 30) return null;               // too little history to be honest
+  var zs=[], fs=[];
+  for (var t=N-1; t<=n-1-H; t++){ zs.push(sellExtZ_(close,N,t)); fs.push(close[t+H]/close[t]-1); }
+  var m=fs.length, baseFall=0; for(var i=0;i<m;i++) if(fs[i]<0) baseFall++; baseFall/=m;
+  var zNow=sellExtZ_(close, N, n-1);
+  var bw=bin, inBin=[];
+  for (var pass=0; pass<8; pass++){
+    inBin=[]; for(var j=0;j<m;j++) if(Math.abs(zs[j]-zNow)<=bw) inBin.push(fs[j]);
+    if (inBin.length>=minBin) break; bw+=0.25;
+  }
+  var k=inBin.length, fall=0, tail=0;
+  for(var j2=0;j2<k;j2++){ if(inBin[j2]<0) fall++; if(inBin[j2]<tailK) tail++; }
+  var pFall = k? fall/k : baseFall, pTail = k? tail/k : null;
+  var se = Math.sqrt(pFall*(1-pFall)/Math.max(k,1));
+  return { z:Math.round(zNow*100)/100, baseRate:Math.round(baseFall*1000)/1000,
+    pFall:Math.round(pFall*1000)/1000, lift:Math.round((pFall-baseFall)*1000)/1000,
+    tail: pTail==null?null:Math.round(pTail*1000)/1000, n:k, bw:Math.round(bw*100)/100,
+    se:Math.round(se*1000)/1000 };
+}
+
+/* deterministic seed from series tail + seeded LCG → reproducible bootstrap */
+function sellSeed_(close){
+  var s=0, start=Math.max(0, close.length-24);
+  for (var i=start;i<close.length;i++){ s=(s*31 + Math.round(close[i]*100)) % 2147483647; }
+  return (s+1) % 2147483647;
+}
+function sellRng_(seed){ var s=(seed||1)%4294967296; return function(){ s=(1664525*s+1013904223)%4294967296; return s/4294967296; }; }
+
+/* moving-block bootstrap P(fall over H) */
+function sellBootstrap_(close, H, block, iters, rng){
+  rng = rng || Math.random;
+  var r=[]; for(var i=1;i<close.length;i++) r.push(Math.log(close[i]/close[i-1]));
+  if (r.length < block+1) return null;
+  var below=0, maxStart=r.length-block;
+  for (var it=0; it<iters; it++){
+    var sum=0, filled=0;
+    while (filled<H){ var start=Math.floor(rng()*maxStart);
+      for (var j=0;j<block && filled<H;j++,filled++) sum+=r[start+j]; }
+    if (sum<0) below++;
+  }
+  return Math.round(below/iters*1000)/1000;
+}
+
+/* assemble sell object + trust guards; grade never A/B when thin or bootstrap-divergent */
+function sellPack_(close, adxRegime, precrossObj){
+  var c = sellConditional_(close, SELL.H, SELL.N, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+  if (!c) return { ok:false };
+  var meanRev = (adxRegime==='chop' || adxRegime==='weak');
+  var gated = !meanRev;
+  var deathEta = (precrossObj && precrossObj.heading==='death') ? precrossObj.etaDays : null;
+  var boot = sellBootstrap_(close, SELL.H, SELL.BOOT_BLOCK, SELL.BOOT_ITERS, sellRng_(sellSeed_(close)));
+
+  var effN = c.n / SELL.H;                                          // overlapping windows → real episodes
+  var thin = effN < SELL.MIN_EFF_N;
+  var divergent = (boot!=null) && Math.abs(c.pFall - boot) > SELL.MAX_DIVERGE;
+
+  var g='';
+  if (!gated && c.lift>0){
+    if (thin || divergent) g='C';                                  // detected but low-trust → capped at C
+    else if (c.lift>=0.15 && ((deathEta!=null && deathEta<=25) || (c.tail!=null && c.tail>=0.28))) g='A';
+    else if (c.lift>=0.08) g='B'; else g='C';
+  }
+  return { ok:true, horizon:SELL.H, pFall:c.pFall, baseRate:c.baseRate, lift:c.lift, tail:c.tail,
+    z:c.z, n:c.n, se:c.se, bootstrap:boot, effN:Math.round(effN*10)/10,
+    thin:thin, divergent:divergent, trust:(thin||divergent)?'low':'ok',
+    regime: meanRev?'MR':'TR', gated:gated, deathEta:deathEta, grade:g };
+}
+
+/* ─── calibration scoring math (pure; Node-tested) ─── */
+function sellBrier_(pairs){                                         // pairs:[{p,y}], y∈{0,1}
+  if(!pairs.length) return null;
+  var s=0; for(var i=0;i<pairs.length;i++){ var d=pairs[i].p-pairs[i].y; s+=d*d; }
+  return Math.round(s/pairs.length*10000)/10000;
+}
+function sellReliability_(pairs, bins){                             // predicted-vs-observed table
+  bins=bins||10; var b=[]; for(var i=0;i<bins;i++) b.push({lo:i/bins,hi:(i+1)/bins,n:0,sp:0,sy:0});
+  for(var j=0;j<pairs.length;j++){ var k=Math.min(bins-1,Math.floor(pairs[j].p*bins)); b[k].n++; b[k].sp+=pairs[j].p; b[k].sy+=pairs[j].y; }
+  return b.map(function(x){ return { band:Math.round(x.lo*100)+'-'+Math.round(x.hi*100)+'%', n:x.n,
+    predicted:x.n?Math.round(x.sp/x.n*1000)/1000:null, observed:x.n?Math.round(x.sy/x.n*1000)/1000:null }; });
+}
+
 /* ═══ FULL PER-STOCK COMPUTE (pure — takes OHLCV, returns pack) ═══ */
 function computePack(bars, withSeries) {
   var cl = bars.close, hi = bars.high, lo = bars.low, vol = bars.volume, n = cl.length;
@@ -421,6 +526,8 @@ function computePack(bars, withSeries) {
   pack.hazards = hg.hazards;
   pack.grade = hg.grade;
 
+  pack.sell = sellPack_(cl, adx.regime, pcEma);   // additive — statistical exit signal + trust guards
+
   if (withSeries) {
     var w = CFG.SERIES_WINDOW;
     pack.series = {
@@ -447,7 +554,8 @@ function scalarRow(sym, pack, meta) {
     stochK: pack.stoch.k, stochState: pack.stoch.state,
     rmi: pack.rmi, rvol: pack.rvol, obvTrend: pack.obvTrend,
     hazards: pack.hazards.map(function (h) { return h.code; }),
-    grade: pack.grade
+    grade: pack.grade,
+    sell: pack.sell
   };
 }
 
@@ -573,17 +681,75 @@ function runScan() {
   var t0 = Date.now();
   var uni = uniList_(), rows = [], syms = uni.map(function (u) { return u.sym; });
   var barsMap = getBarsMany_(syms);
+  var calib = [], today = new Date().toISOString().slice(0, 10);
   uni.forEach(function (u) {
     var bars = barsMap[u.sym];
     var pack = bars ? computePack(bars, false) : { ok: false, error: 'fetch failed' };
     rows.push([u.sym, JSON.stringify(scalarRow(u.sym, pack, u))]);
+    if (pack.ok && pack.sell && pack.sell.ok && !pack.sell.gated && pack.sell.lift > 0)
+      calib.push([today, u.sym, pack.price, pack.sell.pFall, pack.sell.bootstrap, pack.sell.lift, pack.sell.grade, '', '']);
   });
   var sh = sheet_(CFG.SCAN_SHEET, null);
   sh.clear();
   sh.getRange(1, 1).setValue('scannedAt');
   sh.getRange(1, 2).setValue(new Date().toISOString());
   if (rows.length) sh.getRange(2, 1, rows.length, 2).setValues(rows);
-  Logger.log('scan: ' + rows.length + ' symbols in ' + Math.round((Date.now() - t0) / 1000) + 's');
+  if (calib.length) logCalib_(calib, today);   // append-only, idempotent per day
+  Logger.log('scan: ' + rows.length + ' symbols, ' + calib.length + ' sell predictions logged, in ' + Math.round((Date.now() - t0) / 1000) + 's');
+}
+
+/* ═══════════════ CALIBRATION ENGINE (additive) ═══════════════
+   runScan logs each active sell prediction; runCalibScore matures
+   them at H sessions, scores realized falls, and writes Brier +
+   reliability. Its own champion — does NOT inherit steam's.        */
+function logCalib_(rows, today) {
+  var sh = sheet_(CFG.CALIB_SHEET, ['predDate', 'sym', 'price', 'pFall', 'boot', 'lift', 'grade', 'realizedFall', 'scoredAt']);
+  var last = sh.getLastRow();
+  if (last > 1) {
+    var col = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < col.length; i++) if (String(col[i][0]).slice(0, 10) === today) return; // already logged today
+  }
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function runCalibScore() {
+  var sh = sheet_(CFG.CALIB_SHEET, ['predDate', 'sym', 'price', 'pFall', 'boot', 'lift', 'grade', 'realizedFall', 'scoredAt']);
+  var last = sh.getLastRow();
+  if (last < 2) { Logger.log('calib: no predictions logged yet'); return; }
+  var data = sh.getRange(2, 1, last - 1, 9).getValues();
+  var cutoff = Date.now() - CFG.CALIB_MATURE_DAYS * 86400000, bySym = {};
+  data.forEach(function (r, i) {
+    if (r[7] !== '') return;                                  // already scored
+    var pd = new Date(r[0]).getTime();
+    if (isNaN(pd) || pd > cutoff) return;                     // not matured
+    (bySym[r[1]] = bySym[r[1]] || []).push({ row: i + 2, predSec: Math.floor(pd / 1000) });
+  });
+  var scored = 0;
+  Object.keys(bySym).forEach(function (sym) {
+    var bars = getBars_(sym); if (!bars || !bars.ts) return;
+    bySym[sym].forEach(function (p) {
+      var idx = -1;
+      for (var k = 0; k < bars.ts.length; k++) { if (bars.ts[k] != null && bars.ts[k] >= p.predSec) { idx = k; break; } }
+      if (idx < 0) return;
+      var fut = idx + SELL.H; if (fut >= bars.close.length) return;   // future bars not in yet
+      sh.getRange(p.row, 8).setValue(bars.close[fut] < bars.close[idx] ? 1 : 0);
+      sh.getRange(p.row, 9).setValue(new Date().toISOString());
+      scored++;
+    });
+  });
+  var all = sh.getRange(2, 1, sh.getLastRow() - 1, 9).getValues();
+  var pairs = all.filter(function (r) { return r[7] !== ''; }).map(function (r) { return { p: Number(r[3]), y: Number(r[7]) }; });
+  if (!pairs.length) { Logger.log('calib: scored ' + scored + ' new; none mature enough to report'); return; }
+  var brier = sellBrier_(pairs), rel = sellReliability_(pairs, 10);
+  var rs = sheet_(CFG.CALIB_RESULTS_SHEET, ['scoredAt', 'nScored', 'brier', 'reliability']);
+  rs.appendRow([new Date().toISOString(), pairs.length, brier, JSON.stringify(rel)]);
+  Logger.log('calib: scored ' + scored + ' new; total ' + pairs.length + '; Brier ' + brier);
+}
+
+function installCalibTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'runCalibScore') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runCalibScore').timeBased().atHour(19).nearMinute(0).everyDays(1).create();
+  Logger.log('daily runCalibScore trigger installed (~19:00)');
 }
 
 function installTrigger() {
@@ -599,17 +765,26 @@ function doGet(e) {
   var a = (e.parameter.action || '').toLowerCase();
   var out;
   try {
-    if (a === 'ping') out = { ok: true, v: '1.1', now: new Date().toISOString() };
+    if (a === 'ping') out = { ok: true, v: '1.3', now: new Date().toISOString() };
     else if (a === 'universe') out = { ok: true, universe: uniList_() };
     else if (a === 'ind') out = routeInd_(e);
     else if (a === 'radar') out = routeRadar_();
     else if (a === 'pf') out = routePf_(e);
+    else if (a === 'calib') out = routeCalib_();
     else out = { ok: false, error: 'unknown action' };
   } catch (err) {
     out = { ok: false, error: String(err) };
   }
   return ContentService.createTextOutput(JSON.stringify(out))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+function routeCalib_() {
+  var rs = ss_().getSheetByName(CFG.CALIB_RESULTS_SHEET);
+  if (!rs || rs.getLastRow() < 2)
+    return { ok: true, ready: false, msg: 'no calibration results yet — needs ~' + CFG.CALIB_MATURE_DAYS + ' days of matured predictions' };
+  var r = rs.getRange(rs.getLastRow(), 1, 1, 4).getValues()[0];
+  return { ok: true, ready: true, scoredAt: String(r[0]), nScored: r[1], brier: r[2], reliability: JSON.parse(r[3]) };
 }
 
 function routeInd_(e) {
