@@ -20,6 +20,11 @@ body{ background:var(--bg); color:var(--ink); font-family:Arial,sans-serif; font
 .u-brand span{ color:var(--gold); }
 .u-sub{ font-size:11px; color:#8fa1c2; letter-spacing:1.5px; text-transform:uppercase; }
 .u-right{ margin-left:auto; display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:12px; }
+.u-tabs{ display:flex; gap:2px; }
+.u-tab{ padding:0 14px; height:52px; display:flex; align-items:center; font-size:13px; color:#8fa1c2; text-decoration:none; border-bottom:3px solid transparent; transition:color .15s, background .15s; }
+.u-tab:hover{ color:#f0e6c8; background:#233354; }
+.u-tab.active{ color:#f0e6c8; border-bottom-color:var(--gold); background:#233354; }
+@media (max-width:760px){ .u-tabs{ display:none; } }
 .live-dot{ width:8px; height:8px; border-radius:50%; background:#5ee08a; box-shadow:0 0 8px #5ee08a; }
 
 /* ── tabs ── */
@@ -113,9 +118,14 @@ tr.gated{ opacity:.58; }
 <body>
 
 <header class="u-header">
-  <a href="indicators.html" class="u-brand">NSE <span>Indicators</span></a>
-  <span class="u-sub">Pre-cross radar · confirm on close</span>
-  <div class="u-right"><a href="https://anupamkrihna.github.io/nse-dashboard/" style="color:var(--gold);text-decoration:none;font-size:11px;letter-spacing:1px" title="NSE Pro main dashboard">↗ MAIN DASHBOARD</a><div class="live-dot"></div><span id="uClock">–</span><span style="color:#8fa1c2">IST</span></div>
+  <a href="https://anupamkrihna.github.io/nse-dashboard/" class="u-brand">NSE <span>Pro</span></a>
+  <nav class="u-tabs">
+    <a href="https://anupamkrihna.github.io/nse-dashboard/dashboard.html" class="u-tab">📊 Dashboard</a>
+    <a href="https://anupamkrihna.github.io/nse-dashboard/steam.html" class="u-tab">🔥 Steam Gauge</a>
+    <a href="indicators.html" class="u-tab active">⚡ Indicators</a>
+    <a href="https://anupamkrihna.github.io/nse-dashboard/backtest.html" class="u-tab">🎯 Calibration</a>
+  </nav>
+  <div class="u-right"><div class="live-dot"></div><span id="uClock">–</span><span style="color:#8fa1c2">IST</span></div>
 </header>
 
 <div class="tabs">
