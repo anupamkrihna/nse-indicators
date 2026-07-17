@@ -482,6 +482,56 @@ function sellPack_(close, adxRegime, precrossObj){
     regime: meanRev?'MR':'TR', gated:gated, deathEta:deathEta, grade:g };
 }
 
+/* ═══════════════ BULL WATCH (v1.6 — additive, pure) ═══════════════
+   Mirror of the Sell Watch: trend-riding board. A stock is ON the
+   board only when the 20, 50 AND 200 DMAs are all rising (10-session
+   slope > 0). Classification:
+     STRONG — full bull stack (price>20>50>200), ADX trend/strong,
+              no caution triggers: ride.
+     BULL   — all rising but stack incomplete or ADX not yet trending:
+              developing.
+     CAUTION— trend intact but stretched or weakening: RSI divergence,
+              extension ≥30% over the 200, RSI ≥80, or price has
+              slipped under the 20 (pullback underway).
+   Prediction columns reuse the seeded block bootstrap (distribution-
+   free, valid in ALL regimes): P(hold·21d)=1−P(fall), and the tail
+   P(<−5%) as pullback risk. The sell champion map is NOT applied —
+   it was fit on the mean-reverting population only.                 */
+function bullSlp_(arr) {                                   // 10-session slope, % of level
+  var n = arr.length;
+  if (n < 12 || arr[n - 1] == null || arr[n - 11] == null || arr[n - 11] === 0) return null;
+  return Math.round((arr[n - 1] - arr[n - 11]) / arr[n - 11] * 10000) / 100;
+}
+function bullPack_(cl, e20, e50, e200, adxRegime, sell, macdObj, rvolV, obvTrendV, rsiV, rsiDiv) {
+  var n = cl.length, price = cl[n - 1];
+  var s20 = bullSlp_(e20), s50 = bullSlp_(e50), s200 = bullSlp_(e200);
+  if (s20 == null || s50 == null || s200 == null) return { ok: true, on: false };
+  var risingAll = s20 > 0 && s50 > 0 && s200 > 0;
+  if (!risingAll) return { ok: true, on: false };
+  var v20 = e20[n - 1], v50 = e50[n - 1], v200 = e200[n - 1];
+  var ext200 = Math.round((price - v200) / v200 * 1000) / 10;      // % above the 200
+  var dist50 = Math.round((price - v50) / price * 1000) / 10;      // % pullback to reach the 50
+  var stacked = price > v20 && v20 > v50 && v50 > v200;
+  var trending = (adxRegime === 'trend' || adxRegime === 'strong');
+  var why = [];
+  if (rsiDiv) why.push('RSI divergence');
+  if (ext200 >= 30) why.push('extended ' + ext200 + '% over 200');
+  if (rsiV != null && rsiV >= 80) why.push('RSI ' + rsiV + ' ≥80');
+  if (price < v20) why.push('below 20 DMA — pullback underway');
+  var cls = why.length ? 'CAUTION' : (stacked && trending ? 'STRONG' : 'BULL');
+  var confirms = 0;
+  if (macdObj && macdObj.histExpanding && macdObj.histDir === 'bull') confirms++;
+  if (rvolV != null && rvolV >= 1.5) confirms++;
+  if (obvTrendV === 'rising') confirms++;
+  if (rsiV != null && rsiV >= 40 && rsiV <= 80) confirms++;
+  var grade = cls === 'CAUTION' ? 'C' : (trending && confirms >= 2 ? 'A' : 'B');
+  var pHold = (sell && sell.ok && sell.bootstrap != null) ? Math.round((1 - sell.bootstrap) * 1000) / 1000 : null;
+  var pullTail = (sell && sell.ok && sell.tail != null) ? sell.tail : null;
+  return { ok: true, on: true, cls: cls, grade: grade, s20: s20, s50: s50, s200: s200,
+    ext200: ext200, dist50: dist50, stacked: stacked, pHold: pHold, pullTail: pullTail,
+    reasons: why };
+}
+
 /* ─── calibration scoring math (pure; Node-tested) ─── */
 function sellBrier_(pairs){                                         // pairs:[{p,y}], y∈{0,1}
   if(!pairs.length) return null;
@@ -558,6 +608,8 @@ function computePack(bars, withSeries) {
     var _ch = loadChampionMap_();                 // cached per execution
     if (_ch) { pack.sell.pFallCal = isoApply_(_ch.map, pack.sell.pFall); pack.sell.calVer = _ch.version; }
   }
+  pack.bull = bullPack_(cl, e20, e50, e200, adx.regime, pack.sell, macd, rv, ob.trend,
+    pack.rsiValue, pack.rsiDivergence);           // additive — trend-riding board
 
   if (withSeries) {
     var w = CFG.SERIES_WINDOW;
@@ -586,7 +638,8 @@ function scalarRow(sym, pack, meta) {
     rmi: pack.rmi, rvol: pack.rvol, obvTrend: pack.obvTrend,
     hazards: pack.hazards.map(function (h) { return h.code; }),
     grade: pack.grade,
-    sell: pack.sell
+    sell: pack.sell,
+    bull: pack.bull            // additive — Bull Watch board reads the scan
   };
 }
 
@@ -1052,7 +1105,7 @@ function doGet(e) {
   var a = (e.parameter.action || '').toLowerCase();
   var out;
   try {
-    if (a === 'ping') out = { ok: true, v: '1.5', now: new Date().toISOString() };
+    if (a === 'ping') out = { ok: true, v: '1.6', now: new Date().toISOString() };
     else if (a === 'universe') out = { ok: true, universe: uniList_() };
     else if (a === 'ind') out = routeInd_(e);
     else if (a === 'radar') out = routeRadar_();
