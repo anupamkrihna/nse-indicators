@@ -1,0 +1,76 @@
+/* test_bull.js — regression gate for Bull Watch (v1.6). Sources bullSlp_/bullPack_
+   from Code.gs so tests cannot drift from deployed code. Node-only. */
+var fs = require('fs');
+var src = fs.readFileSync('Code.gs', 'utf8');
+function grab(re) { var m = src.match(re); if (!m) throw new Error('missing ' + re); return m[0]; }
+eval(grab(/function bullSlp_[\s\S]*?\n\}/));
+eval(grab(/function bullPack_[\s\S]*?\n\}/));
+
+var pass = 0, fail = 0;
+function ok(c, n) { if (c) pass++; else { fail++; console.log('  ✗ ' + n); } }
+
+/* helpers: build price + MA arrays with controlled slopes and levels */
+function flatArr(n, v) { var a = []; for (var i = 0; i < n; i++) a.push(v); return a; }
+function riseArr(n, v0, pct10) { var a = [], g = Math.pow(1 + pct10 / 100, 1 / 10); for (var i = 0; i < n; i++) a.push(v0 * Math.pow(g, i)); return a; }
+var N = 60;
+function mk(pLast, e20L, e50L, e200L, slopes) {           // slopes: [s20,s50,s200] % per 10 sessions
+  return {
+    cl: flatArr(N - 1, pLast).concat([pLast]),
+    e20: riseArr(N, e20L / Math.pow(1 + slopes[0] / 100, (N - 1) / 10), slopes[0]),
+    e50: riseArr(N, e50L / Math.pow(1 + slopes[1] / 100, (N - 1) / 10), slopes[1]),
+    e200: riseArr(N, e200L / Math.pow(1 + slopes[2] / 100, (N - 1) / 10), slopes[2])
+  };
+}
+var sellOK = { ok: true, bootstrap: 0.42, tail: 0.15 };
+var macdBull = { histExpanding: true, histDir: 'bull' };
+
+console.log('── bull-watch regression ──');
+
+/* 1. off the board when any MA is falling */
+var m1 = mk(100, 98, 95, 90, [1, 1, -0.5]);
+ok(bullPack_(m1.cl, m1.e20, m1.e50, m1.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 60, false).on === false,
+  'falling 200 → not on board');
+var m1b = mk(100, 98, 95, 90, [-1, 1, 0.5]);
+ok(bullPack_(m1b.cl, m1b.e20, m1b.e50, m1b.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 60, false).on === false,
+  'falling 20 → not on board');
+
+/* 2. STRONG: full stack, trending, clean */
+var m2 = mk(100, 98, 95, 90, [1.2, 0.8, 0.4]);
+var b2 = bullPack_(m2.cl, m2.e20, m2.e50, m2.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 60, false);
+ok(b2.on && b2.cls === 'STRONG', 'stacked+trending+clean → STRONG (' + b2.cls + ')');
+ok(b2.grade === 'A', 'trending with ≥2 confirms → grade A (' + b2.grade + ')');
+ok(Math.abs(b2.pHold - 0.58) < 1e-9, 'P(hold)=1−bootstrap (' + b2.pHold + ')');
+ok(b2.ext200 > 0 && b2.dist50 > 0, 'extension and dist-to-50 positive');
+
+/* 3. BULL: all rising but chop regime (not yet trending) */
+var b3 = bullPack_(m2.cl, m2.e20, m2.e50, m2.e200, 'weak', sellOK, macdBull, 1.0, 'flat', 60, false);
+ok(b3.cls === 'BULL', 'rising but ADX weak → BULL (' + b3.cls + ')');
+ok(b3.grade === 'B', 'non-trending → grade B (' + b3.grade + ')');
+
+/* 4. BULL: rising but stack incomplete (20 below 50) */
+var m4 = mk(100, 94, 95, 90, [1, 0.8, 0.4]);
+var b4 = bullPack_(m4.cl, m4.e20, m4.e50, m4.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 60, false);
+ok(b4.cls === 'BULL', 'incomplete stack → BULL not STRONG (' + b4.cls + ')');
+
+/* 5. CAUTION triggers, each alone */
+var b5a = bullPack_(m2.cl, m2.e20, m2.e50, m2.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 60, true);
+ok(b5a.cls === 'CAUTION' && b5a.grade === 'C' && /divergence/.test(b5a.reasons.join()), 'RSI divergence → CAUTION/C');
+var m5 = mk(130, 120, 110, 95, [1, 0.8, 0.4]);                    // ext = (130-95)/95 ≈ 36.8%
+var b5b = bullPack_(m5.cl, m5.e20, m5.e50, m5.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 60, false);
+ok(b5b.cls === 'CAUTION' && /extended/.test(b5b.reasons.join()), 'extension ≥30% over 200 → CAUTION (' + b5b.ext200 + '%)');
+var b5c = bullPack_(m2.cl, m2.e20, m2.e50, m2.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 84, false);
+ok(b5c.cls === 'CAUTION' && /RSI 84/.test(b5c.reasons.join()), 'RSI ≥80 → CAUTION');
+var m6 = mk(96, 98, 95, 90, [1, 0.8, 0.4]);                       // price under the 20
+var b5d = bullPack_(m6.cl, m6.e20, m6.e50, m6.e200, 'trend', sellOK, macdBull, 1.6, 'rising', 60, false);
+ok(b5d.cls === 'CAUTION' && /below 20/.test(b5d.reasons.join()), 'price below 20 DMA → CAUTION (pullback underway)');
+
+/* 6. missing sell/bootstrap degrades gracefully */
+var b6 = bullPack_(m2.cl, m2.e20, m2.e50, m2.e200, 'trend', { ok: false }, macdBull, 1.6, 'rising', 60, false);
+ok(b6.on && b6.pHold === null && b6.pullTail === null, 'no bootstrap → pHold/pullTail null, still classified');
+
+/* 7. short history → off board, no throw */
+ok(bullPack_([100], [100], [100], [100], 'trend', sellOK, macdBull, 1, 'flat', 50, false).on === false,
+  'short series → cleanly off board');
+
+console.log('── ' + pass + ' passed, ' + fail + ' failed ──');
+process.exit(fail ? 1 : 0);
