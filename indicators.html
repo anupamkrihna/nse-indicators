@@ -568,9 +568,11 @@ function loadSell(){
   }).catch(function(e){ $('slStatus').textContent='✗ '+e.message; $('slStatus').className='status err'; });
 }
 function sellRow(x){
-  var s=x.sell, p=Math.round(s.pFall*100), lift=Math.round(s.lift*100),
+  var s=x.sell, praw=Math.round(s.pFall*100),
+      cal=(s.pFallCal!=null), p=(cal?Math.round(s.pFallCal*100):praw), lift=Math.round(s.lift*100),
       tail=s.tail==null?'—':Math.round(s.tail*100)+'%';
   var cls = p>=55?'pf-hi':(p>=45?'pf-mid':'pf-lo');
+  var calMark = cal ? '<span title="calibrated from raw '+praw+'% (champion v'+s.calVer+')" style="color:var(--gold);cursor:help;font-size:9px;vertical-align:super">✓</span>' : '';
   var liftCls = lift>0?'dn':(lift<0?'up':'mut');       // positive lift = sell pressure → bearish colour
   var regime = s.gated
       ? '<span class="gd">TR · gated</span>'
@@ -581,7 +583,7 @@ function sellRow(x){
     : '';
   return '<tr class="row'+(s.gated?' gated':'')+'" data-sym="'+esc(x.sym)+'">'
     +'<td><span class="sym">'+esc(x.sym)+'</span><br><span class="mut">'+esc(x.sector||'')+'</span></td>'
-    +'<td><span class="pfall '+cls+'">'+p+'%</span>'+flag+'</td>'
+    +'<td><span class="pfall '+cls+'">'+p+'%</span>'+calMark+flag+'</td>'
     +'<td class="'+liftCls+'">'+(lift>0?'+':'')+lift+'</td>'
     +'<td>'+tail+'</td>'
     +'<td style="font-size:11px">'+regime+'</td>'
@@ -637,7 +639,12 @@ function sellDiveBlock_(p){
     if(s.divergent) why.push('bootstrap disagrees ('+pf+'% conditional vs '+boot+'% resampled)');
     trustNote=' <b class="gd">⚠ LOW TRUST</b> — '+why.join(' and ')+'; grade held at C rather than the headline figure.';
   }
-  return '<div class="verdict" style="border-color:'+(!s.gated&&lift>0?'#5a2b2b':'#26374f')+'">'+head+extra+trustNote+'</div>';
+  var calNote='';
+  if(s.pFallCal!=null){
+    var pc=Math.round(s.pFallCal*100);
+    calNote=' <b style="color:var(--gold)">CALIBRATED '+pc+'%</b> — champion v'+s.calVer+' maps the raw '+pf+'% onto its historically observed frequency (this is the number to trust).';
+  }
+  return '<div class="verdict" style="border-color:'+(!s.gated&&lift>0?'#5a2b2b':'#26374f')+'">'+head+extra+calNote+trustNote+'</div>';
 }
 
 /* ══════════════ boot ══════════════ */
