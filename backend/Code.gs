@@ -43,7 +43,10 @@ var CFG = {
   PRECROSS_LOOKBACK: 10,     // sessions for gap-slope regression
   HOT_DAYS: 15, WATCH_DAYS: 30,
   SCAN_SHEET: 'Scan', PF_SHEET: 'Portfolios',
-  CALIB_SHEET: 'Calib', CALIB_RESULTS_SHEET: 'CalibResults', CALIB_MATURE_DAYS: 32
+  CALIB_SHEET: 'Calib', CALIB_RESULTS_SHEET: 'CalibResults', CALIB_MATURE_DAYS: 32,
+  CALIB_BF_RANGE: '10y', CALIB_BF_BUDGET_MS: 270000,   // deep history + ~4.5-min wall budget per invocation
+  CALIB_MAP_SHEET: 'CalibMap', CALIB_TRAIN_FRAC: 0.7,  // isotonic champion/challenger: time-split
+  RESEXP_SHEET: 'ResExp'                                // resolution experiment log
 };
 
 /* ═══════════════ UNIVERSE (sym|name|sector|yfTicker) ═══════════════ */
@@ -160,6 +163,30 @@ function adxPack(hi, lo, cl, n) {
   var regime = adx == null ? 'na' : adx < 20 ? 'chop' : adx < 25 ? 'weak' : adx < 50 ? 'trend' : 'strong';
   return { value: adx == null ? null : Math.round(adx * 10) / 10, plusDI: pdi == null ? null : Math.round(pdi * 10) / 10, minusDI: mdi == null ? null : Math.round(mdi * 10) / 10, regime: regime };
 }
+
+/* ADX value at every bar (nulls before warmup) — for historical regime lookup in backfill */
+function adxSeries_(hi, lo, cl, n) {
+  n = n || 14;
+  var len = cl.length, out = new Array(len).fill(null), dxArr = [], adx = null;
+  var trPrev = null, pPrev = null, mPrev = null, trS = 0, pS = 0, mS = 0;
+  for (var i = 1; i < len; i++) {
+    var up = hi[i] - hi[i - 1], dn = lo[i - 1] - lo[i];
+    var pDM = (up > dn && up > 0) ? up : 0, mDM = (dn > up && dn > 0) ? dn : 0;
+    var tr = Math.max(hi[i] - lo[i], Math.abs(hi[i] - cl[i - 1]), Math.abs(lo[i] - cl[i - 1]));
+    if (i <= n) { trS += tr; pS += pDM; mS += mDM; if (i === n) { trPrev = trS; pPrev = pS; mPrev = mS; } }
+    else { trPrev = trPrev - trPrev / n + tr; pPrev = pPrev - pPrev / n + pDM; mPrev = mPrev - mPrev / n + mDM; }
+    if (i >= n && trPrev > 0) {
+      var pdi = 100 * pPrev / trPrev, mdi = 100 * mPrev / trPrev;
+      var dx = (pdi + mdi) === 0 ? 0 : 100 * Math.abs(pdi - mdi) / (pdi + mdi);
+      dxArr.push(dx);
+      if (dxArr.length === n) adx = dxArr.reduce(function (a, b) { return a + b; }) / n;
+      else if (dxArr.length > n) adx = (adx * (n - 1) + dx) / n;
+      out[i] = adx;
+    }
+  }
+  return out;
+}
+function adxRegimeOf_(v) { return v == null ? 'na' : v < 20 ? 'chop' : v < 25 ? 'weak' : v < 50 ? 'trend' : 'strong'; }
 
 /* Supertrend(10, 3×ATR) — returns final state + flip bars-ago */
 function supertrend(hi, lo, cl, period, mult) {
@@ -527,6 +554,10 @@ function computePack(bars, withSeries) {
   pack.grade = hg.grade;
 
   pack.sell = sellPack_(cl, adx.regime, pcEma);   // additive — statistical exit signal + trust guards
+  if (pack.sell && pack.sell.ok) {                // apply the promoted calibration map, if any
+    var _ch = loadChampionMap_();                 // cached per execution
+    if (_ch) { pack.sell.pFallCal = isoApply_(_ch.map, pack.sell.pFall); pack.sell.calVer = _ch.version; }
+  }
 
   if (withSeries) {
     var w = CFG.SERIES_WINDOW;
@@ -583,7 +614,8 @@ function fetchOpts_() {
 function parseYahoo_(json) {
   var res = json && json.chart && json.chart.result && json.chart.result[0];
   if (!res) return null;
-  var q = res.indicators.quote[0];
+  var q = res.indicators && res.indicators.quote && res.indicators.quote[0];
+  if (!q || !q.close || !q.high || !q.low) return null;   // some ranges/symbols return meta-only (no bars)
   var adj = res.indicators.adjclose && res.indicators.adjclose[0] && res.indicators.adjclose[0].adjclose;
   var ts = res.timestamp || [];
   var cl = [], hi = [], lo = [], vol = [], tArr = [], hasAdj = !!adj;
@@ -752,6 +784,261 @@ function installCalibTrigger() {
   Logger.log('daily runCalibScore trigger installed (~19:00)');
 }
 
+function installChampionTrigger() {   // weekly auto-refit; safe — promotion gated by holdout Brier
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'runCalibChampion') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runCalibChampion').timeBased().onWeekDay(ScriptApp.WeekDay.SATURDAY).atHour(9).create();
+  Logger.log('weekly runCalibChampion trigger installed (Sat ~09:00)');
+}
+
+/* ═══════════════ CALIBRATION BACKFILL (Phase 1 — additive) ═══════════════
+   Walk the universe over deep history and score the sell signal
+   retrospectively, so the reliability curve has thousands of episodes
+   TODAY instead of after a month of live logging. Purged-embargo:
+   each prediction's own outcome window (±H) is excluded from the
+   distribution it is scored against, so the label can't leak in.
+   Episodes are sampled non-overlapping (stride H) → independent.
+   Only the shown population is logged: mean-reverting (ADX<25) with
+   positive lift. Rows are written pre-scored (realizedFall filled),
+   so a subsequent runCalibScore() folds them into the report.
+   Chunked + resumable: run repeatedly (or on a trigger) until done. */
+
+function getBarsDeep_(sym, range) {
+  var u = uniMap_()[sym], yf = u ? u.yf : sym + '.NS';
+  var url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(yf)
+    + '?range=' + (range || CFG.CALIB_BF_RANGE) + '&interval=1d&events=split';
+  var resp = UrlFetchApp.fetch(url, fetchOpts_());
+  if (resp.getResponseCode() !== 200) return null;
+  return parseYahoo_(JSON.parse(resp.getContentText()));   // not cached (deep payloads exceed the cache cap)
+}
+
+/* purged-embargo conditional at prediction position p (index into Z/F arrays).
+   Z,F are aligned over valid prediction indices; IDX holds their bar positions. */
+function sellPurged_(Z, F, IDX, p, H, bin, minBin, tailK) {
+  var m = Z.length, zNow = Z[p];
+  var baseN = 0, baseFall = 0;
+  for (var i = 0; i < m; i++) { if (Math.abs(IDX[i] - IDX[p]) <= H) continue; baseN++; if (F[i] < 0) baseFall++; }
+  if (!baseN) return null;
+  baseFall /= baseN;
+  var bw = bin, inBin;
+  for (var pass = 0; pass < 8; pass++) {
+    inBin = [];
+    for (var j = 0; j < m; j++) { if (Math.abs(IDX[j] - IDX[p]) <= H) continue; if (Math.abs(Z[j] - zNow) <= bw) inBin.push(F[j]); }
+    if (inBin.length >= minBin) break; bw += 0.25;
+  }
+  var k = inBin.length, fall = 0, tail = 0;
+  for (var q = 0; q < k; q++) { if (inBin[q] < 0) fall++; if (inBin[q] < tailK) tail++; }
+  var pFall = k ? fall / k : baseFall;
+  return { pFall: Math.round(pFall * 1000) / 1000, lift: Math.round((pFall - baseFall) * 1000) / 1000,
+    tail: k ? Math.round(tail / k * 1000) / 1000 : null, n: k };
+}
+
+function runCalibBackfill() {
+  var t0 = Date.now();
+  var props = PropertiesService.getScriptProperties();
+  var uni = uniList_(), start = parseInt(props.getProperty('calib_bf_idx') || '0', 10);
+  var sh = sheet_(CFG.CALIB_SHEET, ['predDate', 'sym', 'price', 'pFall', 'boot', 'lift', 'grade', 'realizedFall', 'scoredAt']);
+  var batch = [], done = start, logged = 0, skipped = 0, scoredAt = new Date().toISOString();
+  for (var s = start; s < uni.length; s++) {
+    if (Date.now() - t0 > CFG.CALIB_BF_BUDGET_MS) break;      // stop before the 6-min GAS ceiling
+    done = s + 1;
+    try {
+      var u = uni[s], bars = getBarsDeep_(u.sym);
+      if (!bars || !bars.close || bars.close.length < SELL.N + SELL.H + 60) { skipped++; continue; }
+      var cl = bars.close, hi = bars.high, lo = bars.low, ts = bars.ts, n = cl.length;
+      var adxS = adxSeries_(hi, lo, cl, 14);
+      var Z = [], F = [], IDX = [];
+      for (var t = SELL.N - 1; t <= n - 1 - SELL.H; t++) { Z.push(sellExtZ_(cl, SELL.N, t)); F.push(cl[t + SELL.H] / cl[t] - 1); IDX.push(t); }
+      for (var p = 0; p < Z.length; p += SELL.H) {            // non-overlapping episodes → independent
+        var bi = IDX[p], reg = adxRegimeOf_(adxS[bi]);
+        if (reg !== 'chop' && reg !== 'weak') continue;       // only the shown (mean-reverting) population
+        var c = sellPurged_(Z, F, IDX, p, SELL.H, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+        if (!c || c.lift <= 0) continue;                      // only active sell calls
+        var realized = F[p] < 0 ? 1 : 0;
+        var pd = ts[bi] ? new Date(ts[bi] * 1000).toISOString().slice(0, 10) : '';
+        batch.push([pd, u.sym, Math.round(cl[bi] * 100) / 100, c.pFall, '', c.lift, 'bf', realized, scoredAt]);
+        logged++;
+      }
+      if (batch.length >= 2000) { sh.getRange(sh.getLastRow() + 1, 1, batch.length, 9).setValues(batch); batch = []; }
+    } catch (err) { skipped++; }                              // one bad symbol never aborts the batch
+  }
+  if (batch.length) sh.getRange(sh.getLastRow() + 1, 1, batch.length, 9).setValues(batch);
+  var finished = done >= uni.length;
+  props.setProperty('calib_bf_idx', finished ? '0' : String(done));
+  Logger.log('backfill: stocks ' + start + '→' + done + '/' + uni.length + ', ' + logged + ' episodes logged, ' + skipped + ' symbols skipped, ' +
+    Math.round((Date.now() - t0) / 1000) + 's. ' + (finished ? 'DONE — now run runCalibScore().' : 'Not finished — run runCalibBackfill() again to resume.'));
+}
+
+function resetCalibBackfill() {
+  PropertiesService.getScriptProperties().deleteProperty('calib_bf_idx');
+  var sh = ss_().getSheetByName(CFG.CALIB_SHEET);
+  if (sh) { var last = sh.getLastRow(); if (last > 1) {
+    var g = sh.getRange(2, 7, last - 1, 1).getValues();       // drop only 'bf' (backfilled) rows, keep live log
+    for (var i = g.length - 1; i >= 0; i--) if (g[i][0] === 'bf') sh.deleteRow(i + 2);
+  } }
+  Logger.log('backfill progress + backfilled rows cleared (live predictions kept)');
+}
+
+/* ═══════════════ ISOTONIC RECALIBRATION + CHAMPION/CHALLENGER (Phase 3) ═══════════════
+   Fit a monotone map raw P(fall) → true frequency via pool-adjacent-violators,
+   so the displayed probability equals the observed rate. A challenger is fit on
+   the older slice and only PROMOTED if it beats the incumbent on a time-separated
+   holdout — never in-sample. The live signal applies the champion map to pFall. */
+
+function isoFit_(pairs) {                                   // pairs:[{p,y}] → monotone map [{x,y}]
+  var pts = pairs.slice().sort(function (a, b) { return a.p - b.p; });
+  if (!pts.length) return [];
+  var bl = pts.map(function (pt) { return { xl: pt.p, xr: pt.p, w: 1, y: pt.y }; });
+  var i = 0;
+  while (i < bl.length - 1) {
+    if (bl[i].y > bl[i + 1].y + 1e-12) {                    // PAV: pool the violating adjacent blocks
+      var w = bl[i].w + bl[i + 1].w, y = (bl[i].y * bl[i].w + bl[i + 1].y * bl[i + 1].w) / w;
+      bl.splice(i, 2, { xl: bl[i].xl, xr: bl[i + 1].xr, w: w, y: y });
+      if (i > 0) i--;
+    } else i++;
+  }
+  var map = [{ x: Math.round(bl[0].xl * 1000) / 1000, y: Math.round(bl[0].y * 10000) / 10000 }];
+  bl.forEach(function (b) {
+    var x = Math.round(b.xr * 1000) / 1000, yv = Math.round(b.y * 10000) / 10000;
+    if (x > map[map.length - 1].x) map.push({ x: x, y: yv });
+    else map[map.length - 1].y = yv;
+  });
+  return map;
+}
+
+function isoApply_(map, p) {                                // interpolate calibrated probability
+  if (!map || !map.length) return p;
+  if (p <= map[0].x) return map[0].y;
+  if (p >= map[map.length - 1].x) return map[map.length - 1].y;
+  for (var i = 1; i < map.length; i++) {
+    if (p <= map[i].x) {
+      var x0 = map[i - 1].x, x1 = map[i].x, y0 = map[i - 1].y, y1 = map[i].y, t = (x1 - x0) ? (p - x0) / (x1 - x0) : 0;
+      return Math.round((y0 + t * (y1 - y0)) * 1000) / 1000;
+    }
+  }
+  return map[map.length - 1].y;
+}
+
+function brierPairs_(pairs, map) {                          // Brier under raw (map=null) or a calibration map
+  if (!pairs.length) return null;
+  var s = 0;
+  for (var i = 0; i < pairs.length; i++) { var pr = map ? isoApply_(map, pairs[i].p) : pairs[i].p, d = pr - pairs[i].y; s += d * d; }
+  return Math.round(s / pairs.length * 100000) / 100000;
+}
+
+var _champCache;                                           // undefined = not loaded; null = none; object = champion
+function loadChampionMap_() {
+  if (_champCache !== undefined) return _champCache;
+  var ms = ss_().getSheetByName(CFG.CALIB_MAP_SHEET), champ = null;
+  if (ms && ms.getLastRow() > 1) {
+    var d = ms.getRange(2, 1, ms.getLastRow() - 1, 9).getValues();
+    for (var i = d.length - 1; i >= 0; i--) {
+      if (d[i][7] === true || String(d[i][7]).toUpperCase() === 'TRUE') { champ = { version: d[i][0], map: JSON.parse(d[i][8]), holdBrier: d[i][6] }; break; }
+    }
+  }
+  _champCache = champ;
+  return champ;
+}
+
+function runCalibChampion() {
+  var sh = ss_().getSheetByName(CFG.CALIB_SHEET);
+  if (!sh || sh.getLastRow() < 51) { Logger.log('champion: need ≥50 scored pairs'); return { ok:false, error:'need ≥50 scored pairs' }; }
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 9).getValues();
+  var rows = [];
+  data.forEach(function (r) {
+    if (r[7] === '' || r[3] === '') return;
+    var p = Number(r[3]), y = Number(r[7]); if (isNaN(p) || isNaN(y)) return;
+    rows.push({ date: String(r[0]), p: p, y: y });
+  });
+  if (rows.length < 50) { Logger.log('champion: <50 usable pairs'); return { ok:false, error:'<50 usable pairs' }; }
+  rows.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });   // time order
+  var cut = Math.floor(rows.length * CFG.CALIB_TRAIN_FRAC), train = rows.slice(0, cut), hold = rows.slice(cut);
+  var challenger = isoFit_(train);
+  var bRaw = brierPairs_(hold, null), bCha = brierPairs_(hold, challenger);
+  var champ = loadChampionMap_(), bChamp = champ ? brierPairs_(hold, champ.map) : null;
+  var beat = (bChamp == null) ? (bCha < bRaw - 1e-6) : (bCha < bChamp - 1e-6);
+  var ver = (champ ? champ.version : 0) + (beat ? 1 : 0);
+  var ms = sheet_(CFG.CALIB_MAP_SHEET, ['version', 'fittedAt', 'nTrain', 'nHold', 'brierRaw', 'brierChampion', 'brierChallenger', 'promoted', 'map']);
+  ms.appendRow([beat ? ver : (champ ? champ.version : 0), new Date().toISOString(), train.length, hold.length,
+    bRaw, bChamp == null ? '' : bChamp, bCha, beat, JSON.stringify(beat ? challenger : (champ ? champ.map : challenger))]);
+  _champCache = undefined;                                  // force reload
+  var summary = { ok: true, promoted: beat, version: beat ? ver : (champ ? champ.version : 0),
+    nTrain: train.length, nHold: hold.length, brierRaw: bRaw,
+    brierChampion: bChamp, brierChallenger: bCha };
+  Logger.log('champion: holdout Brier — raw ' + bRaw + ' | champ ' + (bChamp == null ? '—' : bChamp) + ' | challenger ' + bCha +
+    ' → ' + (beat ? 'PROMOTED v' + ver + ' (' + challenger.length + ' pts)' : 'kept incumbent'));
+  return summary;
+}
+
+/* ═══════════════ RESOLUTION EXPERIMENT (Phase B) ═══════════════
+   Does a second feature separate outcomes WITHIN the actionable high-pFall
+   tail, beyond raw overextension? Logs per-episode candidate features over
+   deep history; resolutionReport() measures the tail-sharpening each adds.
+   Chunked + resumable, same as backfill. */
+
+function runResolutionExperiment() {
+  var t0 = Date.now(), props = PropertiesService.getScriptProperties();
+  var uni = uniList_(), start = parseInt(props.getProperty('resexp_idx') || '0', 10);
+  var sh = sheet_(CFG.RESEXP_SHEET, ['sym', 'realizedFall', 'pFall', 'emaGapPct', 'rsi']);
+  var batch = [], done = start, logged = 0, skipped = 0;
+  for (var s = start; s < uni.length; s++) {
+    if (Date.now() - t0 > CFG.CALIB_BF_BUDGET_MS) break;
+    done = s + 1;
+    try {
+      var u = uni[s], bars = getBarsDeep_(u.sym);
+      if (!bars || !bars.close || bars.close.length < SELL.N + SELL.H + 60) { skipped++; continue; }
+      var cl = bars.close, hi = bars.high, lo = bars.low, n = cl.length;
+      var adxS = adxSeries_(hi, lo, cl, 14), e50 = ema(cl, 50), e200 = ema(cl, 200), rsiA = rsiSeries(cl, 14);
+      var Z = [], F = [], IDX = [];
+      for (var t = SELL.N - 1; t <= n - 1 - SELL.H; t++) { Z.push(sellExtZ_(cl, SELL.N, t)); F.push(cl[t + SELL.H] / cl[t] - 1); IDX.push(t); }
+      for (var p = 0; p < Z.length; p += SELL.H) {
+        var bi = IDX[p], reg = adxRegimeOf_(adxS[bi]);
+        if (reg !== 'chop' && reg !== 'weak') continue;
+        var c = sellPurged_(Z, F, IDX, p, SELL.H, SELL.BIN, SELL.MINBIN, SELL.TAIL);
+        if (!c || c.lift <= 0) continue;
+        if (e50[bi] == null || e200[bi] == null || e200[bi] === 0 || rsiA[bi] == null) continue;
+        var gap = Math.round((e50[bi] - e200[bi]) / e200[bi] * 10000) / 10000;
+        batch.push([u.sym, F[p] < 0 ? 1 : 0, c.pFall, gap, Math.round(rsiA[bi] * 10) / 10]);
+        logged++;
+      }
+      if (batch.length >= 2000) { sh.getRange(sh.getLastRow() + 1, 1, batch.length, 5).setValues(batch); batch = []; }
+    } catch (err) { skipped++; }
+  }
+  if (batch.length) sh.getRange(sh.getLastRow() + 1, 1, batch.length, 5).setValues(batch);
+  var finished = done >= uni.length;
+  props.setProperty('resexp_idx', finished ? '0' : String(done));
+  Logger.log('resexp: stocks ' + start + '→' + done + '/' + uni.length + ', ' + logged + ' episodes, ' + skipped + ' skipped, ' +
+    Math.round((Date.now() - t0) / 1000) + 's. ' + (finished ? 'DONE — now run resolutionReport().' : 'Not finished — run runResolutionExperiment() again.'));
+}
+
+function resolutionTable_(rows) {                           // pure — the experiment's analysis
+  if (rows.length < 30) return null;
+  function rate(rs) { if (!rs.length) return null; var f = 0; for (var i = 0; i < rs.length; i++) f += rs[i].y; return Math.round(f / rs.length * 1000) / 1000; }
+  function split3(arr, key) {                              // bottom third / top third by RANK (tie-safe)
+    var s = arr.slice().sort(function (a, b) { return a[key] - b[key]; }), t = Math.floor(s.length / 3);
+    return { lo: s.slice(0, t), hi: s.slice(s.length - t) };
+  }
+  var base = rate(rows), ps = split3(rows, 'p'), top = ps.hi, bot = ps.lo;
+  var out = { n: rows.length, baseRate: base, pFall: { bottom: rate(bot), top: rate(top), spread: Math.round((rate(top) - rate(bot)) * 1000) / 1000 }, features: {} };
+  ['gap', 'rsi'].forEach(function (f) {
+    var solo = split3(rows, f), tail = split3(top, f);
+    var rHi = rate(solo.hi), rLo = rate(solo.lo), rtHi = rate(tail.hi), rtLo = rate(tail.lo);
+    out.features[f] = { soloLo: rLo, soloHi: rHi, soloSpread: (rHi != null && rLo != null) ? Math.round((rHi - rLo) * 1000) / 1000 : null,
+      inTopLo: rtLo, inTopHi: rtHi, tailSharpen: (rtHi != null && rtLo != null) ? Math.round((rtHi - rtLo) * 1000) / 1000 : null };
+  });
+  return out;
+}
+
+function resolutionReport() {
+  var sh = ss_().getSheetByName(CFG.RESEXP_SHEET);
+  if (!sh || sh.getLastRow() < 31) { Logger.log('resexp: not enough rows — run runResolutionExperiment() first'); return; }
+  var d = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues(), rows = [];
+  d.forEach(function (r) { rows.push({ y: Number(r[1]), p: Number(r[2]), gap: Number(r[3]), rsi: Number(r[4]) }); });
+  var tbl = resolutionTable_(rows);
+  var rs = sheet_(CFG.RESEXP_SHEET + 'Results', ['at', 'result']);
+  rs.appendRow([new Date().toISOString(), JSON.stringify(tbl)]);
+  Logger.log('resexp report: ' + JSON.stringify(tbl));
+}
+
 function installTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'runScan') ScriptApp.deleteTrigger(t);
@@ -765,12 +1052,14 @@ function doGet(e) {
   var a = (e.parameter.action || '').toLowerCase();
   var out;
   try {
-    if (a === 'ping') out = { ok: true, v: '1.3', now: new Date().toISOString() };
+    if (a === 'ping') out = { ok: true, v: '1.5', now: new Date().toISOString() };
     else if (a === 'universe') out = { ok: true, universe: uniList_() };
     else if (a === 'ind') out = routeInd_(e);
     else if (a === 'radar') out = routeRadar_();
     else if (a === 'pf') out = routePf_(e);
     else if (a === 'calib') out = routeCalib_();
+    else if (a === 'resexp') out = routeResexp_();
+    else if (a === 'calibfit') out = runCalibChampion();   // push-to-recalibrate; safe — promotion holdout-gated
     else out = { ok: false, error: 'unknown action' };
   } catch (err) {
     out = { ok: false, error: String(err) };
@@ -780,11 +1069,20 @@ function doGet(e) {
 }
 
 function routeCalib_() {
+  var champ = loadChampionMap_();
+  var champObj = champ ? { version: champ.version, holdoutBrier: champ.holdBrier, points: champ.map.length, map: champ.map } : null;
   var rs = ss_().getSheetByName(CFG.CALIB_RESULTS_SHEET);
   if (!rs || rs.getLastRow() < 2)
-    return { ok: true, ready: false, msg: 'no calibration results yet — needs ~' + CFG.CALIB_MATURE_DAYS + ' days of matured predictions' };
+    return { ok: true, ready: false, champion: champObj, msg: 'no calibration results yet — run runCalibScore()' };
   var r = rs.getRange(rs.getLastRow(), 1, 1, 4).getValues()[0];
-  return { ok: true, ready: true, scoredAt: String(r[0]), nScored: r[1], brier: r[2], reliability: JSON.parse(r[3]) };
+  return { ok: true, ready: true, scoredAt: String(r[0]), nScored: r[1], brier: r[2], reliability: JSON.parse(r[3]), champion: champObj };
+}
+
+function routeResexp_() {
+  var rs = ss_().getSheetByName(CFG.RESEXP_SHEET + 'Results');
+  if (!rs || rs.getLastRow() < 2) return { ok: true, ready: false, msg: 'no resolution report yet — run runResolutionExperiment() then resolutionReport()' };
+  var r = rs.getRange(rs.getLastRow(), 1, 1, 2).getValues()[0];
+  return { ok: true, ready: true, at: String(r[0]), result: JSON.parse(r[1]) };
 }
 
 function routeInd_(e) {
