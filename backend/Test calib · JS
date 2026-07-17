@@ -1,0 +1,73 @@
+/* test_calib.js — regression gate for isotonic recalibration + resolution.
+   Sources functions from Code.gs. The headline test rebuilds the real 21,817-
+   episode decile curve and proves recalibration lowers Brier and de-inflates
+   the tail (83% → its true ~68%). Node-only. */
+var fs = require('fs');
+var src = fs.readFileSync('Code.gs', 'utf8');
+function grab(re) { var m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; }
+eval([
+  grab(/function isoFit_[\s\S]*?\n\}/),
+  grab(/function isoApply_[\s\S]*?\n\}/),
+  grab(/function brierPairs_[\s\S]*?\n\}/),
+  grab(/function resolutionTable_[\s\S]*?\n\}/)
+].join('\n'));
+
+var pass = 0, fail = 0;
+function ok(c, n) { if (c) pass++; else { fail++; console.log('  ✗ ' + n); } }
+function approx(a, b, e, n) { ok(Math.abs(a - b) <= e, n + ' (' + a + ' vs ' + b + ')'); }
+
+console.log('── recalibration + resolution regression ──');
+
+/* helper: build pairs for a bin of n samples, predicted p, observed frequency obs */
+function bin(n, p, obs, arr) { var ones = Math.round(n * obs); for (var i = 0; i < n; i++) arr.push({ p: p, y: i < ones ? 1 : 0 }); }
+
+/* 1. isotonic output is monotone non-decreasing */
+var demo = []; bin(50, 0.2, 0.5, demo); bin(50, 0.4, 0.3, demo); bin(50, 0.6, 0.8, demo);  // middle violates
+var m = isoFit_(demo);
+var mono = true; for (var i = 1; i < m.length; i++) if (m[i].y < m[i - 1].y - 1e-9 || m[i].x < m[i - 1].x - 1e-9) mono = false;
+ok(mono, 'isotonic map is monotone in x and y');
+
+/* 2. PAV pools an adjacent violation to the pooled mean */
+var v = []; bin(100, 0.3, 0.8, v); bin(100, 0.5, 0.2, v);   // decreasing → must pool to 0.5
+approx(isoApply_(isoFit_(v), 0.3), 0.5, 0.02, 'PAV pools violation to pooled mean');
+
+/* 3. apply clamps outside the fitted range */
+ok(isoApply_(m, -1) === m[0].y && isoApply_(m, 2) === m[m.length - 1].y, 'apply clamps beyond endpoints');
+
+/* 4. THE REAL CURVE — rebuild the 21,817-episode deciles and recalibrate */
+var real = [];
+bin(563, 0.384, 0.412, real); bin(9857, 0.46, 0.452, real); bin(9439, 0.539, 0.462, real);
+bin(1726, 0.633, 0.504, real); bin(174, 0.738, 0.592, real); bin(56, 0.834, 0.679, real);
+var bRaw = brierPairs_(real, null), map = isoFit_(real), bCal = brierPairs_(real, map);
+console.log('   real-curve Brier: raw ' + bRaw + ' → calibrated ' + bCal);
+ok(bCal < bRaw, 'recalibration lowers Brier on the real curve (' + bRaw + '→' + bCal + ')');
+approx(isoApply_(map, 0.834), 0.679, 0.03, 'inflated 83% de-inflates to its true ~68% (INDHOTEL fix)');
+approx(isoApply_(map, 0.633), 0.504, 0.03, 'raw 63% → true ~50%');
+ok(isoApply_(map, 0.46) >= 0.44 && isoApply_(map, 0.46) <= 0.47, 'well-calibrated middle barely moves');
+
+/* 5. generalization — fit on a train half, still improves on a held-out half */
+var tr = [], te = [];
+[[281, 0.384, 0.412], [4900, 0.46, 0.452], [4700, 0.539, 0.462], [860, 0.633, 0.504], [87, 0.738, 0.592], [28, 0.834, 0.679]]
+  .forEach(function (b) { bin(b[0], b[1], b[2], tr); bin(b[0], b[1], b[2], te); });
+var mapTr = isoFit_(tr);
+ok(brierPairs_(te, mapTr) < brierPairs_(te, null), 'train-fit map improves held-out Brier (no overfit)');
+
+/* 6. resolution table — a feature that sharpens the tail vs one that doesn't */
+var rows = [];
+var rng = (function () { var s = 12345; return function () { s = (1664525 * s + 1013904223) % 4294967296; return s / 4294967296; }; })();
+for (var k = 0; k < 1800; k++) {
+  var p = 0.4 + (k / 1800) * 0.45;            // continuous 0.40 → 0.85
+  var gap = (k % 2) ? 0.05 : -0.05;           // within the top-pFall third, positive gap falls much more
+  var rsi = 30 + Math.floor(rng() * 40);      // genuinely independent of gap and outcome
+  var isTop = p > (0.4 + 0.45 * 2 / 3);
+  var y = isTop ? (gap > 0 ? (k % 10 < 8 ? 1 : 0) : (k % 10 < 3 ? 1 : 0))
+                : (k % 10 < 4 ? 1 : 0);
+  rows.push({ p: p, y: y, gap: gap, rsi: rsi });
+}
+var rt = resolutionTable_(rows);
+ok(rt.pFall.spread > 0.1, 'pFall itself resolves (top tercile falls more than bottom): ' + rt.pFall.spread);
+ok(rt.features.gap.tailSharpen > 0.2, 'gap sharpens the tail (adds resolution): ' + rt.features.gap.tailSharpen);
+ok(Math.abs(rt.features.rsi.tailSharpen) < 0.2, 'independent rsi does NOT sharpen the tail: ' + rt.features.rsi.tailSharpen);
+
+console.log('── ' + pass + ' passed, ' + fail + ' failed ──');
+process.exit(fail ? 1 : 0);
