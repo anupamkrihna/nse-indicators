@@ -112,6 +112,11 @@ tr.row:hover{ background:#faf7ef; cursor:pointer; }
 .pfall.pf-mid{ background:#faf4e2; color:var(--goldD); border:1px solid #e6d9b0; }
 .pfall.pf-lo{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
 tr.gated{ opacity:.58; }
+/* ── bull watch ── */
+.bcls{ font-family:var(--mono); font-weight:700; font-size:11px; padding:2px 8px; border-radius:20px; }
+.bcls.b-strong{ background:#2e6b45; color:#fff; }
+.bcls.b-bull{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
+.bcls.b-caution{ background:#faf4e2; color:var(--goldD); border:1px solid #e6d9b0; }
 .sl-legend{ font-size:11px; color:var(--muted); background:#f5f1e7; border:1px solid var(--edge); border-radius:9px; padding:9px 12px; margin-top:12px; line-height:1.55; }
 /* ── sell calibration ── */
 .cb-cards{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:14px; }
@@ -138,6 +143,7 @@ tr.gated{ opacity:.58; }
   <div class="tab on" data-tab="pf">📁 Portfolio</div>
   <div class="tab" data-tab="radar">📡 Cross Radar</div>
   <div class="tab" data-tab="sell">📉 Sell Watch</div>
+  <div class="tab" data-tab="bull">🐂 Bull Watch</div>
   <div class="tab" data-tab="calib">🧭 Sell Calibration</div>
 </div>
 
@@ -223,6 +229,27 @@ tr.gated{ opacity:.58; }
     <div class="sl-legend"><b>How to read:</b> P(fall) is the share of this stock's history that fell over the next 21 sessions from the current stretch · <b>Lift</b> is P(fall) minus the stock's own base rate — only positive lift is a real edge · <b>MR</b> mean-reverting (sell valid), <b class="gd">TR · gated</b> trending (ADX suppresses the exit) · entry price is ignored throughout.</div>
   </div>
 
+  <!-- ═══════════ BULL WATCH ═══════════ -->
+  <div class="panel" id="panel-bull">
+    <div class="status" id="blStatus"></div>
+    <div class="filters">
+      <span id="blBadge" class="badge">–</span>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="radio" name="blScope" value="pf" checked onchange="renderBull()"> Portfolio</label>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="radio" name="blScope" value="uni" onchange="renderBull()"> Universe</label>
+      <select id="blClass" onchange="renderBull()"><option value="">class: all</option><option value="STRONG">STRONG only</option><option value="BULL">BULL only</option><option value="CAUTION">CAUTION only</option></select>
+      <select id="blSector" onchange="renderBull()"><option value="">sector: all</option></select>
+      <button onclick="renderBull()">Apply</button>
+    </div>
+    <div class="board">
+      <h3>▲ Bull Watch · 20/50/200 DMA all rising</h3>
+      <div style="overflow:auto"><table><thead><tr>
+        <th>Stock</th><th>Class</th><th>Slopes 20/50/200</th><th>Ext&gt;200</th><th>to 50 DMA</th><th>P(hold·21d)</th><th>Pullback &lt;−5%</th><th>Grade</th>
+      </tr></thead><tbody id="bullBody"></tbody></table></div>
+      <div class="showing" id="bullShow"></div>
+    </div>
+    <div class="sl-legend"><b>How to read:</b> a stock appears only when all three DMAs are rising (10-session slopes, shown in %/10d) · <b class="up">STRONG</b> = full stack (price&gt;20&gt;50&gt;200) in a trending ADX regime — ride it · <b>BULL</b> = rising but stack or trend not yet complete — developing · <b class="gd">CAUTION</b> = trend intact but stretched or weakening (divergence, ≥30% over the 200, RSI ≥80, or price under the 20) · <b>Ext&gt;200</b> = elevation above the 200 DMA; <b>to 50 DMA</b> = pullback distance to the usual landing zone · <b>P(hold)</b> is the distribution-free bootstrap continuation probability (1 − P(fall·21d)); the sell champion map is not applied here as it is fit on mean-reverting stocks only · trend rides through overbought readings — that is what STRONG means, not a reversal signal.</div>
+  </div>
+
   <!-- ═══════════ SELL CALIBRATION ═══════════ -->
   <div class="panel" id="panel-calib">
     <div class="status" id="cbStatus"></div>
@@ -265,6 +292,7 @@ document.querySelectorAll('.tab').forEach(function(t){
     t.classList.add('on'); $('panel-'+t.dataset.tab).classList.add('on');
     if(t.dataset.tab==='radar' && !radarLoaded) loadRadar();
     if(t.dataset.tab==='sell') loadSell();
+    if(t.dataset.tab==='bull') loadBull();
     if(t.dataset.tab==='calib' && !calibLoaded) loadCalib();
   });
 });
@@ -425,7 +453,8 @@ function openDive(sym){
       +'<svg id="diveSvg" viewBox="0 0 900 300" preserveAspectRatio="none" style="height:300px"></svg></div>'
       +(p.hazards.length?'<div class="hzline">⚠ '+p.hazards.map(function(h){return esc(h.msg);}).join(' · ')+'</div>':'')
       +'<div class="verdict">'+verdict+'</div>'
-      + sellDiveBlock_(p);
+      + sellDiveBlock_(p)
+      + bullDiveBlock_(p);
 
     drawDive(p);
   }).catch(function(e){ d.innerHTML='<div style="color:#f0655a">✗ '+esc(e.message)+'</div>'; });
@@ -686,6 +715,95 @@ function sellDiveBlock_(p){
   return '<div class="verdict" style="border-color:'+(!s.gated&&lift>0?'#5a2b2b':'#26374f')+'">'+head+extra+calNote+trustNote+'</div>';
 }
 
+/* ══════════════ bull watch (v1.6 — additive) ══════════════ */
+var BL_LAST=[], bullShowN=60, blSectorsFilled=false;
+var BL_ORDER={STRONG:0,BULL:1,CAUTION:2};
+function fillBlSectors_(){
+  if(blSectorsFilled||!UNI.length) return; var sel=$('blSector');
+  Array.from(new Set(UNI.map(function(u){return u.sector;}))).filter(Boolean).sort().forEach(function(s){
+    var o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
+  blSectorsFilled=true;
+}
+function loadBull(){
+  fillBlSectors_();
+  if(radarLoaded||scanFetched){
+    if(RD.length && RD[0].bull===undefined){
+      $('blStatus').innerHTML='<span class="dn">scan predates v1.6 — re-run <b>runScan()</b> in Apps Script to populate bull metrics.</span>'; $('blStatus').className='status err';
+    }
+    if($('blBadge').textContent==='–'){ $('blBadge').className='badge live'; $('blBadge').textContent='scan loaded'; }
+    renderBull(); return;
+  }
+  $('blStatus').textContent='loading universe scan…';
+  J(API+'?action=radar').then(function(r){
+    if(!r.ok){ $('blBadge').className='badge unavail'; $('blBadge').textContent='UNAVAILABLE'; $('blStatus').textContent=r.error||'no scan — run runScan() once'; $('blStatus').className='status err'; return; }
+    RD=r.rows.filter(function(x){return x.ok;}); scanFetched=true;
+    var sc=new Date(r.scannedAt), fresh=(Date.now()-sc.getTime())<86400000;
+    $('blBadge').className='badge '+(fresh?'live':'stale');
+    $('blBadge').textContent=(fresh?'LIVE · ':'⚠ STALE · ')+sc.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+    if(RD.length && RD[0].bull===undefined){ $('blStatus').innerHTML='<span class="dn">scan predates v1.6 — re-run <b>runScan()</b>.</span>'; $('blStatus').className='status err'; }
+    else { $('blStatus').textContent='scan covers '+RD.length+' stocks · slopes on completed bars'; $('blStatus').className='status'; }
+    renderBull();
+  }).catch(function(e){ $('blStatus').textContent='✗ '+e.message; $('blStatus').className='status err'; });
+}
+function bullRow(x){
+  var bl=x.bull, hold=bl.pHold==null?'—':Math.round(bl.pHold*100)+'%',
+      tail=bl.pullTail==null?'—':Math.round(bl.pullTail*100)+'%';
+  var pill='<span class="bcls b-'+bl.cls.toLowerCase()+'"'+(bl.reasons&&bl.reasons.length?' title="'+esc(bl.reasons.join(' · '))+'"':'')+'>'+bl.cls+'</span>';
+  var slp='<span class="up">▲'+bl.s20+'</span> / <span class="up">▲'+bl.s50+'</span> / <span class="up">▲'+bl.s200+'</span>';
+  return '<tr class="row" data-sym="'+esc(x.sym)+'">'
+    +'<td><span class="sym">'+esc(x.sym)+'</span><br><span class="mut">'+esc(x.sector||'')+'</span></td>'
+    +'<td>'+pill+'</td>'
+    +'<td style="font-size:11px">'+slp+'</td>'
+    +'<td>'+bl.ext200+'%</td>'
+    +'<td class="mut">−'+bl.dist50+'%</td>'
+    +'<td class="'+(bl.pHold!=null&&bl.pHold>=0.55?'up':'')+'">'+hold+'</td>'
+    +'<td>'+tail+'</td>'
+    +'<td><span class="grade '+bl.grade+'">'+bl.grade+'</span></td></tr>';
+}
+function renderBull(){
+  bullShowN=60;
+  var scopeEl=document.querySelector('input[name=blScope]:checked'), scope=scopeEl?scopeEl.value:'pf';
+  var clsF=$('blClass').value, sec=$('blSector').value;
+  var rows=RD.filter(function(x){
+    if(!x.bull||!x.bull.on) return false;
+    if(scope==='pf'){ if(!pfSyms.length) return false; if(pfSyms.indexOf(x.sym)<0) return false; }
+    if(clsF && x.bull.cls!==clsF) return false;
+    if(sec && x.sector!==sec) return false;
+    return true;
+  });
+  rows.sort(function(a,b){
+    var d=BL_ORDER[a.bull.cls]-BL_ORDER[b.bull.cls]; if(d) return d;
+    return (b.bull.pHold||0)-(a.bull.pHold||0);
+  });
+  BL_LAST=rows;
+  var empty=(scope==='pf'&&!pfSyms.length)?'select a portfolio in the Portfolio tab first, or switch to Universe':'nothing matching filters';
+  $('bullBody').innerHTML=rows.slice(0,bullShowN).map(bullRow).join('')||'<tr><td colspan="8" class="mut">'+empty+'</td></tr>';
+  bullShowLine(rows.length);
+}
+function bullShowLine(total){
+  var shown=Math.min(bullShowN,total), html='showing '+shown+' of '+total;
+  if(total>shown) html+=' &nbsp;<button style="padding:3px 10px;font-size:11px" onclick="bullMore()">▼ show all '+total+'</button>';
+  $('bullShow').innerHTML=html;
+}
+function bullMore(){ bullShowN=999999; $('bullBody').innerHTML=BL_LAST.map(bullRow).join(''); bullShowLine(BL_LAST.length); }
+$('bullBody').addEventListener('click',function(e){
+  var tr=e.target.closest('tr.row'); if(!tr) return;
+  document.querySelector('.tab[data-tab=pf]').click();
+  openDive(tr.dataset.sym);
+});
+/* additive bull verdict inside the deep dive */
+function bullDiveBlock_(p){
+  var bl=p.bull; if(!bl||!bl.on) return '';
+  var hold=bl.pHold==null?'—':Math.round(bl.pHold*100)+'%', tail=bl.pullTail==null?'—':Math.round(bl.pullTail*100)+'%';
+  var head = bl.cls==='STRONG'
+    ? '<b class="up">▲ STRONG BULL</b> — 20/50/200 all rising with a full stack in a trending regime: ride it, buy dips toward the averages.'
+    : bl.cls==='BULL'
+      ? '<b class="up">▲ BULL (developing)</b> — all three DMAs rising but the stack or ADX trend is not yet complete.'
+      : '<b class="gd">▲ BULL · CAUTION</b> — trend intact but '+esc(bl.reasons.join(' and '))+'.';
+  var extra=' Slopes '+bl.s20+'/'+bl.s50+'/'+bl.s200+' %/10d · extended <b>'+bl.ext200+'%</b> over the 200 · pullback landing zone ≈ the 50 DMA (<b>−'+bl.dist50+'%</b> from here) · continuation P(hold 21d) <b>'+hold+'</b> (bootstrap) · pullback P(&lt;−5%) <b>'+tail+'</b> · bull grade <b>'+bl.grade+'</b>.';
+  return '<div class="verdict" style="border-color:'+(bl.cls==='CAUTION'?'#6b5a1e':'#2b4d38')+'">'+head+extra+'</div>';
+}
+
 /* ══════════════ sell calibration panel ══════════════ */
 var calibLoaded=false;
 function pushCalibFit(){
@@ -773,4 +891,3 @@ function mapAt_(map,p){
 </script>
 </body>
 </html>
-
