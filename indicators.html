@@ -232,6 +232,10 @@ tr.gated{ opacity:.58; }
       <div class="cb-card"><div class="cb-k">Champion</div><div class="cb-v" id="cbChamp" style="font-size:15px">–</div></div>
       <div class="cb-card"><div class="cb-k">Holdout Brier</div><div class="cb-v" id="cbHold">–</div></div>
     </div>
+    <div style="display:flex;gap:8px;align-items:center;margin:-4px 0 12px">
+      <button id="cbFitBtn" onclick="pushCalibFit()">⟳ Refit champion</button>
+      <span class="mut" id="cbFitMsg" style="font-size:11px">challenger only promotes if it beats the incumbent on holdout — safe to push anytime</span>
+    </div>
     <div class="board">
       <h3>Reliability · predicted vs observed P(fall · 21d)</h3>
       <svg id="cbSvg" viewBox="0 0 700 430" style="display:block;width:100%;height:auto"></svg>
@@ -684,6 +688,18 @@ function sellDiveBlock_(p){
 
 /* ══════════════ sell calibration panel ══════════════ */
 var calibLoaded=false;
+function pushCalibFit(){
+  var b=$('cbFitBtn'); b.disabled=true; $('cbFitMsg').textContent='fitting challenger on latest scored data…';
+  J(API+'?action=calibfit').then(function(r){
+    b.disabled=false;
+    if(!r.ok){ $('cbFitMsg').textContent='✗ '+(r.error||'fit failed'); return; }
+    $('cbFitMsg').textContent = (r.promoted
+      ? '✓ PROMOTED v'+r.version+' — challenger beat incumbent on holdout ('+r.brierChallenger+' vs '+(r.brierChampion==null?r.brierRaw+' raw':r.brierChampion)+')'
+      : '· kept incumbent v'+r.version+' — challenger '+r.brierChallenger+' did not beat '+(r.brierChampion==null?'raw '+r.brierRaw:r.brierChampion)+' on holdout')
+      + ' · train '+r.nTrain+' / hold '+r.nHold;
+    calibLoaded=false; loadCalib();                       // refresh cards + chart with the (possibly new) champion
+  }).catch(function(e){ b.disabled=false; $('cbFitMsg').textContent='✗ '+e.message; });
+}
 function loadCalib(){
   $('cbStatus').textContent='loading calibration…';
   J(API+'?action=calib').then(function(j){
