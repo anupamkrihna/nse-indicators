@@ -187,6 +187,7 @@ tr.gated{ opacity:.58; }
       <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" id="fAdx"> ADX ≥ 25 only</label>
       <select id="fSector"><option value="">sector: all</option></select>
       <select id="fGrade"><option value="">grade: all</option><option>A</option><option>B</option><option>C</option></select>
+      <input type="text" id="rdSearch" placeholder="🔎 search stock…" style="min-width:150px" oninput="renderRadar()">
       <button onclick="renderRadar()">Apply</button>
     </div>
     <div class="boards">
@@ -217,6 +218,7 @@ tr.gated{ opacity:.58; }
       <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" id="slGate" checked onchange="renderSell()"> hide gated (trending)</label>
       <select id="slSector" onchange="renderSell()"><option value="">sector: all</option></select>
       <select id="slLift" onchange="renderSell()"><option value="0">lift: any</option><option value="5">lift ≥ +5</option><option value="10">lift ≥ +10</option><option value="15">lift ≥ +15</option></select>
+      <input type="text" id="slSearch" placeholder="🔎 search stock…" style="min-width:150px" oninput="renderSell()">
       <button onclick="renderSell()">Apply</button>
     </div>
     <div class="board death">
@@ -238,6 +240,7 @@ tr.gated{ opacity:.58; }
       <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="radio" name="blScope" value="uni" onchange="renderBull()"> Universe</label>
       <select id="blClass" onchange="renderBull()"><option value="">class: all</option><option value="STRONG">STRONG only</option><option value="BULL">BULL only</option><option value="CAUTION">CAUTION only</option></select>
       <select id="blSector" onchange="renderBull()"><option value="">sector: all</option></select>
+      <input type="text" id="blSearch" placeholder="🔎 search stock…" style="min-width:150px" oninput="renderBull()">
       <button onclick="renderBull()">Apply</button>
     </div>
     <div class="board">
@@ -553,6 +556,7 @@ function radarRow(x){
 function renderRadar(){
   showN={golden:40,death:40};
   var band=$('fBand').value, adxOnly=$('fAdx').checked, sec=$('fSector').value, gr=$('fGrade').value;
+  var q=qVal_('rdSearch');                              // v1.7 search
   var gradeRank={A:0,B:1,C:2};
   function pick(heading){
     var rows=RD.filter(function(x){
@@ -562,6 +566,7 @@ function renderRadar(){
       if(adxOnly && !(x.adx>=25)) return false;
       if(sec && x.sector!==sec) return false;
       if(gr && x.grade!==gr) return false;
+      if(q && !qMatch_(x,q)) return false;              // v1.7 search
       return true;
     });
     rows.sort(function(a,b){
@@ -572,8 +577,8 @@ function renderRadar(){
   }
   var G=pick('golden'), D=pick('death');
   RD_LAST={golden:G, death:D};
-  $('goldBody').innerHTML = G.slice(0,showN.golden).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
-  $('deathBody').innerHTML = D.slice(0,showN.death).map(radarRow).join('') || '<tr><td colspan="9" class="mut">nothing matching filters</td></tr>';
+  $('goldBody').innerHTML = G.slice(0,showN.golden).map(radarRow).join('') || qMiss_(q,9);
+  $('deathBody').innerHTML = D.slice(0,showN.death).map(radarRow).join('') || qMiss_(q,9);
   showLine('goldShow','golden',G.length);
   showLine('deathShow','death',D.length);
 }
@@ -661,12 +666,14 @@ function renderSell(){
   sellShowN=60;
   var scopeEl=document.querySelector('input[name=slScope]:checked'), scope=scopeEl?scopeEl.value:'pf';
   var hideGated=$('slGate').checked, sec=$('slSector').value, minLift=parseFloat($('slLift').value||'0');
+  var q=qVal_('slSearch');                              // v1.7 search
   var rows=RD.filter(function(x){
     if(!x.sell||!x.sell.ok) return false;
     if(scope==='pf'){ if(!pfSyms.length) return false; if(pfSyms.indexOf(x.sym)<0) return false; }
     if(sec && x.sector!==sec) return false;
     if(hideGated && x.sell.gated) return false;
     if(x.sell.lift*100 < minLift) return false;
+    if(q && !qMatch_(x,q)) return false;                // v1.7 search
     return true;
   });
   rows.sort(function(a,b){ return b.sell.pFall-a.sell.pFall; });
@@ -674,7 +681,7 @@ function renderSell(){
   var empty = (scope==='pf'&&!pfSyms.length)
     ? 'select a portfolio in the Portfolio tab first, or switch to Universe'
     : 'nothing matching filters';
-  $('sellBody').innerHTML = rows.slice(0,sellShowN).map(sellRow).join('') || '<tr><td colspan="6" class="mut">'+empty+'</td></tr>';
+  $('sellBody').innerHTML = rows.slice(0,sellShowN).map(sellRow).join('') || (q ? qMiss_(q,6) : '<tr><td colspan="6" class="mut">'+empty+'</td></tr>');
   sellShowLine(rows.length);
 }
 function sellShowLine(total){
@@ -764,11 +771,13 @@ function renderBull(){
   bullShowN=60;
   var scopeEl=document.querySelector('input[name=blScope]:checked'), scope=scopeEl?scopeEl.value:'pf';
   var clsF=$('blClass').value, sec=$('blSector').value;
+  var q=qVal_('blSearch');                              // v1.7 search
   var rows=RD.filter(function(x){
     if(!x.bull||!x.bull.on) return false;
     if(scope==='pf'){ if(!pfSyms.length) return false; if(pfSyms.indexOf(x.sym)<0) return false; }
     if(clsF && x.bull.cls!==clsF) return false;
     if(sec && x.sector!==sec) return false;
+    if(q && !qMatch_(x,q)) return false;                // v1.7 search
     return true;
   });
   rows.sort(function(a,b){
@@ -777,7 +786,7 @@ function renderBull(){
   });
   BL_LAST=rows;
   var empty=(scope==='pf'&&!pfSyms.length)?'select a portfolio in the Portfolio tab first, or switch to Universe':'nothing matching filters';
-  $('bullBody').innerHTML=rows.slice(0,bullShowN).map(bullRow).join('')||'<tr><td colspan="8" class="mut">'+empty+'</td></tr>';
+  $('bullBody').innerHTML=rows.slice(0,bullShowN).map(bullRow).join('')||(q ? qMiss_(q,8) : '<tr><td colspan="8" class="mut">'+empty+'</td></tr>');
   bullShowLine(rows.length);
 }
 function bullShowLine(total){
@@ -878,6 +887,38 @@ function mapAt_(map,p){
   if(p<=map[0].x) return map[0].y; if(p>=map[map.length-1].x) return map[map.length-1].y;
   for(var i=1;i<map.length;i++){ if(p<=map[i].x){ var x0=map[i-1].x,x1=map[i].x,y0=map[i-1].y,y1=map[i].y,t=(x1-x0)?(p-x0)/(x1-x0):0; return y0+t*(y1-y0);} }
   return map[map.length-1].y;
+}
+
+/* ══════════════ quick search (v1.7 — additive) ══════════════ */
+/* Search boxes on Radar / Sell / Bull filter bars. Matches sym, company
+   name (via UNIMAP) and sector across the FULL board (pre-slice), so a
+   stock ranked #90 is found even though only 40/60 rows are rendered.
+   If the query matches universe stocks that are simply not on that board,
+   qMiss_ renders clickable chips that jump straight to the deep dive. */
+function qVal_(id){ var el=$(id); return el?el.value.trim():''; }
+function qMatch_(x,q){
+  q=q.toUpperCase();
+  if(x.sym && x.sym.toUpperCase().indexOf(q)>=0) return true;
+  var u=UNIMAP[x.sym];
+  if(u && u.name && u.name.toUpperCase().indexOf(q)>=0) return true;
+  if(x.sector && x.sector.toUpperCase().indexOf(q)>=0) return true;
+  return false;
+}
+function qMiss_(q,cols){
+  if(!q) return '<tr><td colspan="'+cols+'" class="mut">nothing matching filters</td></tr>';
+  var Q=q.toUpperCase();
+  var hits=UNI.filter(function(u){
+    return u.sym.toUpperCase().indexOf(Q)>=0 || (u.name&&u.name.toUpperCase().indexOf(Q)>=0);
+  }).slice(0,6);
+  if(!hits.length) return '<tr><td colspan="'+cols+'" class="mut">no stock in the '+UNI.length+'-name universe matches “'+esc(q)+'” — it may not be in STOCK_MASTER (e.g. suspended / non-index names)</td></tr>';
+  var chips=hits.map(function(u){
+    return '<button style="padding:3px 10px;font-size:11px;margin:2px" onclick="jumpDive_(\''+esc(u.sym)+'\')">'+esc(u.sym)+' ↗</button>';
+  }).join(' ');
+  return '<tr><td colspan="'+cols+'" class="mut">“'+esc(q)+'” is not on this board (its signals don\u2019t qualify) — open deep dive instead: '+chips+'</td></tr>';
+}
+function jumpDive_(sym){
+  var t=document.querySelector('.tab[data-tab=pf]'); if(t) t.click();
+  openDive(sym);
 }
 
 /* ══════════════ boot ══════════════ */
