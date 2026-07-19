@@ -69,6 +69,16 @@ tr.row:hover{ background:#faf7ef; cursor:pointer; }
 .mut{ color:var(--muted); font-size:11px; }
 .up{ color:var(--bull); font-weight:600; } .dn{ color:var(--bear); font-weight:600; } .gd{ color:var(--goldD); font-weight:600; }
 .hz{ font-family:var(--mono); font-size:9.5px; padding:1px 6px; border-radius:6px; background:#faeeed; color:var(--bear); border:1px solid #e3c2c0; margin-right:3px; }
+/* ── black sheep (v1.8 — additive) ── */
+.bsv{ font-family:var(--mono); font-size:11px; font-weight:700; padding:2px 10px; border-radius:999px; white-space:nowrap; }
+.bsv.sheep{ background:#faeeed; color:var(--bear); border:1px solid #e3c2c0; }
+.bsv.grey{ background:#faf4e2; color:var(--goldD); border:1px solid #e6d9b0; }
+.bsv.clean{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
+.bsv.pend{ background:#f4f2ec; color:var(--muted); border:1px solid var(--edge); }
+.bschip{ font-size:11px; margin-left:5px; cursor:help; }
+.bs-fl{ font-size:11.5px; margin:3px 0; line-height:1.45; }
+.bs-fl a{ color:inherit; text-decoration:underline; }
+.bs-fl .bs-t{ font-family:var(--mono); font-size:9px; font-weight:700; opacity:0.7; margin-right:5px; }
 .grade{ font-family:var(--mono); font-weight:700; padding:2px 9px; border-radius:7px; }
 .grade.A{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
 .grade.B{ background:#faf4e2; color:var(--goldD); border:1px solid #e6d9b0; }
@@ -144,6 +154,7 @@ tr.gated{ opacity:.58; }
   <div class="tab" data-tab="radar">📡 Cross Radar</div>
   <div class="tab" data-tab="sell">📉 Sell Watch</div>
   <div class="tab" data-tab="bull">🐂 Bull Watch</div>
+  <div class="tab" data-tab="sheep">🐏 Black Sheep</div>
   <div class="tab" data-tab="calib">🧭 Sell Calibration</div>
 </div>
 
@@ -253,6 +264,24 @@ tr.gated{ opacity:.58; }
     <div class="sl-legend"><b>How to read:</b> a stock appears only when all three DMAs are rising (10-session slopes, shown in %/10d) · <b class="up">STRONG</b> = full stack (price&gt;20&gt;50&gt;200) in a trending ADX regime — ride it · <b>BULL</b> = rising but stack or trend not yet complete — developing · <b class="gd">CAUTION</b> = trend intact but stretched or weakening (divergence, ≥30% over the 200, RSI ≥80, or price under the 20) · <b>Ext&gt;200</b> = elevation above the 200 DMA; <b>to 50 DMA</b> = pullback distance to the usual landing zone · <b>P(hold)</b> is the distribution-free bootstrap continuation probability (1 − P(fall·21d)); the sell champion map is not applied here as it is fit on mean-reverting stocks only · trend rides through overbought readings — that is what STRONG means, not a reversal signal.</div>
   </div>
 
+  <!-- ═══════════ BLACK SHEEP (v1.8) ═══════════ -->
+  <div class="panel" id="panel-sheep">
+    <div class="status" id="shStatus"></div>
+    <div class="filters">
+      <button class="primary" onclick="sheepCheckPortfolio()">Check portfolio</button>
+      <input type="text" id="shInput" placeholder="check any NSE symbol… e.g. GAYAPROJ" style="min-width:220px" onkeydown="if(event.key==='Enter')sheepCheckInput()">
+      <button onclick="sheepCheckInput()">Check</button>
+      <span class="mut" style="font-size:11px">screens for data gaps · relistings · NCLT/SEBI/regulatory news · works for symbols outside the universe too</span>
+    </div>
+    <div class="board">
+      <h3>🐏 Black Sheep Screen</h3>
+      <div style="overflow:auto"><table><thead><tr>
+        <th>Stock</th><th>Verdict</th><th>Flags — plain words, with evidence links</th><th>Checked</th>
+      </tr></thead><tbody id="sheepBody"><tr><td colspan="4" class="mut">nothing checked yet — hit <b>Check portfolio</b>, or type any symbol above. Stocks flagged here have price histories or regulatory situations that make normal indicators unreliable.</td></tr></tbody></table></div>
+    </div>
+    <div class="sl-legend"><b>How to read:</b> <b class="dn">🐏 BLACK SHEEP</b> = at least one HIGH flag — suspension gap, relisting discontinuity, fewer than 200 clean bars, or NCLT/insolvency/fraud/going-concern news; every indicator and score on this stock blends economically different eras — judge it on events, not charts · <b class="gd">⚠ GREY</b> = caution flags only (SEBI action, surveillance lists, thin volume, young listing) — signals usable but read the flags first · <b class="up">🟢 CLEAN</b> = no gaps, no red-flag news · checks run against the Steam Gauge black-sheep engine (6h server cache) and are remembered for this session · portfolio members are auto-checked when the matrix loads, and flagged names get a 🐏/⚠ chip in the Portfolio matrix.</div>
+  </div>
+
   <!-- ═══════════ SELL CALIBRATION ═══════════ -->
   <div class="panel" id="panel-calib">
     <div class="status" id="cbStatus"></div>
@@ -296,6 +325,7 @@ document.querySelectorAll('.tab').forEach(function(t){
     if(t.dataset.tab==='radar' && !radarLoaded) loadRadar();
     if(t.dataset.tab==='sell') loadSell();
     if(t.dataset.tab==='bull') loadBull();
+    if(t.dataset.tab==='sheep') loadSheep();
     if(t.dataset.tab==='calib' && !calibLoaded) loadCalib();
   });
 });
@@ -361,6 +391,7 @@ function addSym(s){
   if(!pfName){ pfName='My Watchlist'; }
   if(pfSyms.indexOf(s)<0) pfSyms.push(s);
   drawChips();
+  bsWarnOnAdd_(s);                                 /* v1.8 black sheep */
 }
 function rmSym(s){ pfSyms=pfSyms.filter(function(x){return x!==s;}); drawChips(); }
 function drawChips(){
@@ -414,6 +445,7 @@ function loadMatrix(){
     }).join('');
     $('mtx').style.display='table';
     pfStatus('loaded '+rows.length+' · click a row for the deep dive · indicators on completed bars');
+    bsDecorateMatrix_();                             /* v1.8 black sheep */
   }).catch(function(e){ pfStatus('✗ '+e.message,true); });
 }
 $('mtxBody').addEventListener('click',function(e){
@@ -919,6 +951,130 @@ function qMiss_(q,cols){
 function jumpDive_(sym){
   var t=document.querySelector('.tab[data-tab=pf]'); if(t) t.click();
   openDive(sym);
+}
+
+/* ══════════════ black sheep (v1.8 — additive) ══════════════ */
+/* Cross-system: calls the Steam Gauge project's ?action=blacksheep route
+   (BlackSheep.gs bs1.1). Session cache per symbol; max 3 concurrent
+   fetches so GAS quotas stay comfortable. Surfaces in three places:
+   ① warning when a flagged stock is added to a portfolio,
+   ② 🐏/⚠ chips in the Portfolio matrix (auto-check on load),
+   ③ the Black Sheep tab — on-demand check of ANY symbol, in or out
+      of the 438-name universe (the Gayatri case). */
+var BS_API='https://script.google.com/macros/s/AKfycbxbqcip3QPPRP5YUxngoWecv5nN2eKk5h9T2WYL2_vmTs3ix6Tjt_KTfKq2MDptrmPMcw/exec';
+var BS={};                       // sym -> {verdict,flags,bars,lastBar,checkedAt} | {pending:Promise} | {error}
+var BS_ORDER_={BLACKSHEEP:0,GREY:1,CLEAN:2,ERROR:3};
+var bsActive=0, bsQueue=[];
+
+function bsFetch_(sym){
+  sym=String(sym||'').toUpperCase().trim().replace(/\.(NS|BO)$/,'');
+  if(!sym) return Promise.resolve(null);
+  if(BS[sym] && !BS[sym].pending && !BS[sym].error) return Promise.resolve(BS[sym]);
+  if(BS[sym] && BS[sym].pending) return BS[sym].pending;
+  var run=function(){
+    bsActive++;
+    var u=UNIMAP[sym], name=u&&u.name?u.name:sym;
+    return fetch(BS_API+'?action=blacksheep&sym='+encodeURIComponent(sym)+'&name='+encodeURIComponent(name))
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        BS[sym] = j&&j.ok ? j : {error:(j&&j.error)||'engine error', verdict:'ERROR', flags:[]};
+        return BS[sym];
+      })
+      .catch(function(e){ BS[sym]={error:e.message, verdict:'ERROR', flags:[]}; return BS[sym]; })
+      .then(function(res){ bsActive--; bsPump_(); return res; });
+  };
+  var p = (bsActive<3) ? run() : new Promise(function(resolve){ bsQueue.push(function(){ run().then(resolve); }); });
+  BS[sym]={pending:p};
+  return p;
+}
+function bsPump_(){ while(bsActive<3 && bsQueue.length){ bsQueue.shift()(); } }
+
+function bsChipHtml_(d){
+  if(!d||d.pending) return '';
+  if(d.verdict==='BLACKSHEEP') return '<span class="bschip" title="'+esc(bsFlagText_(d))+'">🐏</span>';
+  if(d.verdict==='GREY')       return '<span class="bschip" title="'+esc(bsFlagText_(d))+'">⚠</span>';
+  return '';
+}
+function bsFlagText_(d){
+  return (d.flags||[]).map(function(f){ return '['+f.sev+'] '+(f.text||f.label||f.code); }).join('\n') || 'flagged';
+}
+
+/* ① portfolio-add warning */
+function bsWarnOnAdd_(sym){
+  bsFetch_(sym).then(function(d){
+    if(!d||d.error) return;
+    if(d.verdict==='BLACKSHEEP')
+      pfStatus('🐏 '+sym+' is a BLACK SHEEP — added, but its price history or regulatory situation makes every indicator on it unreliable. Review it in the Black Sheep tab.',true);
+    else if(d.verdict==='GREY')
+      pfStatus('⚠ '+sym+' carries caution flags — see the Black Sheep tab before trusting its signals.');
+    bsDecorateMatrix_();
+  });
+}
+
+/* ② matrix chips — decorate rendered rows once verdicts arrive */
+function bsDecorateMatrix_(){
+  var body=$('mtxBody'); if(!body) return;
+  var trs=body.querySelectorAll('tr.row[data-sym]');
+  trs.forEach(function(tr){
+    var sym=tr.dataset.sym, d=BS[sym];
+    if(d===undefined){ bsFetch_(sym).then(function(){ bsDecorateMatrix_(); }); return; }
+    if(!d||d.pending) return;
+    var cell=tr.querySelector('.sym'); if(!cell) return;
+    var old=cell.parentNode.querySelector('.bschip'); if(old) old.remove();
+    var chip=bsChipHtml_(d);
+    if(chip) cell.insertAdjacentHTML('afterend',chip);
+  });
+}
+
+/* ③ Black Sheep tab */
+function loadSheep(){ renderSheep_(); if(!Object.keys(BS).length) $('shStatus').textContent='nothing checked this session yet'; }
+function sheepCheckPortfolio(){
+  if(!pfSyms.length){ $('shStatus').textContent='no portfolio loaded — pick one in the Portfolio tab first'; $('shStatus').className='status err'; return; }
+  $('shStatus').textContent='checking '+pfSyms.length+' portfolio stocks…'; $('shStatus').className='status';
+  var left=pfSyms.length;
+  pfSyms.forEach(function(s){
+    bsFetch_(s).then(function(){ left--; renderSheep_(); bsDecorateMatrix_();
+      if(!left){ $('shStatus').textContent='portfolio screen complete — '+bsCount_('BLACKSHEEP')+' black sheep, '+bsCount_('GREY')+' grey, '+bsCount_('CLEAN')+' clean'; } });
+  });
+}
+function sheepCheckInput(){
+  var sym=$('shInput').value.toUpperCase().trim().replace(/\.(NS|BO)$/,''); if(!sym) return;
+  $('shInput').value='';
+  $('shStatus').textContent='checking '+sym+'… (first check of a stock takes a few seconds — price scan + news scan)'; $('shStatus').className='status';
+  delete BS[sym];                      // manual check = fresh look
+  renderSheepPending_(sym);
+  bsFetch_(sym).then(function(){ $('shStatus').textContent=sym+' checked'; renderSheep_(); bsDecorateMatrix_(); });
+}
+function bsCount_(v){ var c=0,k; for(k in BS){ if(BS[k]&&BS[k].verdict===v) c++; } return c; }
+function renderSheepPending_(sym){ BS[sym]=BS[sym]||{pending:true}; renderSheep_(); }
+function renderSheep_(){
+  var syms=Object.keys(BS); if(!syms.length) return;
+  syms.sort(function(a,b){
+    var da=BS[a]||{}, db=BS[b]||{};
+    var ra=da.pending?4:(BS_ORDER_[da.verdict]!=null?BS_ORDER_[da.verdict]:3);
+    var rb=db.pending?4:(BS_ORDER_[db.verdict]!=null?BS_ORDER_[db.verdict]:3);
+    return ra!==rb?ra-rb:(a<b?-1:1);
+  });
+  $('sheepBody').innerHTML=syms.map(function(sym){
+    var d=BS[sym], u=UNIMAP[sym];
+    var nm=u&&u.name?u.name:'', sec=u&&u.sector?u.sector:(nm?'':'outside the 438 universe');
+    var head='<td><span class="sym">'+esc(sym)+'</span>'+(nm?'<br><span class="mut">'+esc(nm)+'</span>':'<br><span class="mut">'+esc(sec)+'</span>')+'</td>';
+    if(!d||d.pending) return '<tr>'+head+'<td><span class="bsv pend">checking…</span></td><td class="mut">price scan + regulatory news scan running</td><td class="mut">—</td></tr>';
+    if(d.verdict==='ERROR') return '<tr>'+head+'<td><span class="bsv pend">error</span></td><td class="mut">'+esc(d.error||'engine unreachable')+'</td><td class="mut">—</td></tr>';
+    var pill = d.verdict==='BLACKSHEEP'?'<span class="bsv sheep">🐏 BLACK SHEEP</span>'
+             : d.verdict==='GREY'?'<span class="bsv grey">⚠ GREY</span>'
+             : '<span class="bsv clean">🟢 CLEAN</span>';
+    var tn={1:'DATA',2:'FUND',3:'REG/NEWS'};
+    var fl=(d.flags&&d.flags.length)
+      ? d.flags.map(function(f){
+          var txt=esc(f.text||f.label||f.code);
+          if(f.url) txt='<a href="'+esc(f.url)+'" target="_blank" rel="noopener">'+txt+'</a>';
+          return '<div class="bs-fl"><span class="bs-t">['+(tn[f.tier]||f.tier)+' · '+esc(f.sev)+']</span>'+txt+(f.date?' <span class="mut">('+esc(f.date)+')</span>':'')+'</div>';
+        }).join('')
+      : '<span class="mut">no data gaps, no red-flag news'+(d.bars?' · '+d.bars+' clean bars':'')+'</span>';
+    var when=(d.checkedAt?String(d.checkedAt).slice(0,16).replace('T',' '):'—')+(d.cached?' <span class="mut">(cached)</span>':'');
+    return '<tr>'+head+'<td>'+pill+'</td><td>'+fl+'</td><td class="mut" style="font-size:11px">'+when+'</td></tr>';
+  }).join('');
 }
 
 /* ══════════════ boot ══════════════ */
