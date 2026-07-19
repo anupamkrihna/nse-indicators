@@ -1,0 +1,90 @@
+/* test_sheep.js — regression gate for the Black Sheep module (indicators.html v1.8).
+   Sources the module verbatim from indicators.html; stubs fetch/DOM.
+   Node-only — never deploy to GAS. Requires Node ≥ 14. */
+var fs = require('fs');
+var h = fs.readFileSync('indicators.html', 'utf8');
+var m = h.match(/\/\* ══════════════ black sheep \(v1\.8[\s\S]*?(?=\/\* ══════════════ boot)/);
+if (!m) { console.error('✗ black sheep block not found'); process.exit(1); }
+
+var n = 0, bad = 0;
+function T(name, cond){ n++; if(!cond){ bad++; console.log('  ✗ ' + name); } }
+
+(async function(){
+  /* ── stubs ── */
+  var UNIMAP = { HAL:{sym:'HAL',name:'Hindustan Aeronautics',sector:'Defence'} };
+  var DOM = {};
+  function mkEl(){ return { value:'', textContent:'', className:'', innerHTML:'', querySelectorAll:function(){return [];}, querySelector:function(){return null;} }; }
+  function $(id){ if(!DOM[id]) DOM[id]=mkEl(); return DOM[id]; }
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  var pfSyms = [], statusMsgs = [];
+  function pfStatus(msg, err){ statusMsgs.push({msg:msg, err:!!err}); }
+
+  var live = 0, maxLive = 0, resolvers = [], calls = [];
+  var fetch = function(url){
+    calls.push(url); live++; maxLive = Math.max(maxLive, live);
+    return new Promise(function(resolve){
+      resolvers.push(function(payload){
+        live--;
+        resolve({ json: function(){ return Promise.resolve(payload); } });
+      });
+    });
+  };
+
+  eval(m[0]);
+
+  /* ── suffix normalization + name passthrough ── */
+  var p1 = bsFetch_('HAL.NS');
+  T('suffix stripped in request URL', calls[0].indexOf('sym=HAL&') >= 0 && calls[0].indexOf('HAL.NS') < 0);
+  T('company name from UNIMAP in URL', decodeURIComponent(calls[0]).indexOf('Hindustan Aeronautics') >= 0);
+  T('cache keyed on bare symbol', !!BS['HAL'] && BS['HAL.NS'] === undefined);
+
+  /* ── concurrency cap: 6 requests, only 3 in flight ── */
+  ['A','B','C','D','E'].forEach(function(s){ bsFetch_(s); });
+  T('never more than 3 concurrent fetches', maxLive === 3);
+  T('overflow queued', bsQueue.length === 3);           // A,B in flight w/ HAL; C,D,E queued
+
+  /* resolve all in order; queue should drain */
+  function drain(payload){ while(resolvers.length){ resolvers.shift()(payload); } return new Promise(function(r){ setTimeout(r, 0); }); }
+  await drain({ ok:true, verdict:'CLEAN', flags:[], bars:500, checkedAt:'2026-07-19T10:00:00Z' });
+  await drain({ ok:true, verdict:'CLEAN', flags:[], bars:500, checkedAt:'2026-07-19T10:00:00Z' });
+  T('queue fully drained', bsQueue.length === 0 && bsActive === 0);
+  T('all six symbols resolved CLEAN', ['HAL','A','B','C','D','E'].every(function(s){ return BS[s] && BS[s].verdict === 'CLEAN'; }));
+
+  /* ── cache: second call issues no new fetch ── */
+  var before = calls.length;
+  var again = await bsFetch_('HAL');
+  T('cached symbol re-served without refetch', calls.length === before && again.verdict === 'CLEAN');
+
+  /* ── error path ── */
+  BS['ERR1'] = undefined; delete BS['ERR1'];
+  var pe = bsFetch_('ERR1');
+  resolvers.shift()({ ok:false, error:'sym required' });
+  var errRes = await pe;
+  T('backend not-ok → ERROR verdict with message', errRes.verdict === 'ERROR' && /sym required/.test(errRes.error));
+
+  /* ── chip mapping ── */
+  T('chip: BLACKSHEEP → 🐏', bsChipHtml_({verdict:'BLACKSHEEP',flags:[{sev:'HIGH',text:'gap'}]}).indexOf('🐏') >= 0);
+  T('chip: GREY → ⚠', bsChipHtml_({verdict:'GREY',flags:[]}).indexOf('⚠') >= 0);
+  T('chip: CLEAN → no chip', bsChipHtml_({verdict:'CLEAN',flags:[]}) === '');
+  T('chip: pending → no chip', bsChipHtml_({pending:true}) === '');
+  T('chip tooltip carries flag text', bsChipHtml_({verdict:'BLACKSHEEP',flags:[{sev:'HIGH',text:'115-day gap'}]}).indexOf('115-day gap') >= 0);
+
+  /* ── warning on add ── */
+  BS['SHEEPY'] = { verdict:'BLACKSHEEP', flags:[{sev:'HIGH',text:'gap'}] };
+  bsWarnOnAdd_('SHEEPY');
+  await new Promise(function(r){ setTimeout(r, 0); });
+  T('add warning fired for black sheep', statusMsgs.some(function(s){ return /BLACK SHEEP/.test(s.msg) && s.err; }));
+
+  /* ── board render + verdict ordering ── */
+  BS['GREYCO'] = { verdict:'GREY', flags:[{sev:'MED', code:'NEWS', label:'SEBI action', text:'SEBI penalty on GreyCo', date:'2026-05-01', url:'https://x'}], checkedAt:'2026-07-19T10:00:00Z' };
+  renderSheep_();
+  var html = DOM['sheepBody'].innerHTML;
+  T('board renders all checked symbols', /SHEEPY/.test(html) && /GREYCO/.test(html) && /HAL/.test(html));
+  T('order: sheep before grey before clean', html.indexOf('SHEEPY') < html.indexOf('GREYCO') && html.indexOf('GREYCO') < html.indexOf('HAL'));
+  T('news flag rendered as evidence link', html.indexOf('href="https://x"') >= 0);
+  T('non-universe symbol labelled honestly', html.indexOf('outside the 438 universe') >= 0);  // A–E not in UNIMAP
+  T('counts: 1 sheep / 1 grey', bsCount_('BLACKSHEEP') === 1 && bsCount_('GREY') === 1);
+
+  console.log((bad ? '✗ ' + bad + ' of ' : '✓ all ') + n + ' assertions ' + (bad ? 'FAILED' : 'passed'));
+  process.exit(bad ? 1 : 0);
+})();
