@@ -1,0 +1,153 @@
+# UNIVERSE v2 audit — 2026-07-20
+
+**Result: 535 names** (437 − 22 deleted + 7 fixed in place + 120 admits)
+
+## Deleted (with reasons)
+
+- **ADANIGAS** — duplicate of ATGL (wrong sym)
+- **BCG** — sym/name mismatch (BCG is Brightcom Group, a SEBI-fraud-flagged stock; Bengal & Assam is BENGALASM) — self-contradictory entry
+- **CENTURYTEX** — Century Textiles renamed Aditya Birla Real Estate — ABREL arrives via admits
+- **EQUITAS** — Equitas Holdings delisted after merger into EQUITASBNK (already present)
+- **GMRINFRA** — renamed GMR Airports — GMRAIRPORT arrives via admits
+- **IBULHSGFIN** — renamed Sammaan Capital — SAMMAANCAP arrives via admits
+- **ICICLOMBRD** — wrong sym for ICICI Lombard — real sym ICICIGI arrives via admits
+- **KEEI** — duplicate of KEI (wrong sym)
+- **KEILTD** — duplicate of KEI (wrong sym)
+- **LTIM** — LTIMindtree renamed LTM — LTM arrives via admits
+- **MAZAGON** — wrong sym — real sym MAZDOCK arrives via admits (kept as Defence)
+- **NAYARA** — not a listed company (Essar Oil was delisted; Nayara is unlisted)
+- **NLC** — wrong sym for NLC India — NLCINDIA arrives via admits
+- **ONCOSIL** — ASX-listed Australian company, not on NSE
+- **PHILIPCARB** — renamed PCBL Chemical — PCBL arrives via admits
+- **POLPHARMA** — wrong sym for Poly Medicure — real sym POLYMED arrives via admits
+- **TV18BRDCST** — TV18 Broadcast merged into Network18 (Oct 2024) and delisted
+- **TVSL** — TVS Logistics is not separately listed — TVSSCS (present) is the listed entity
+- **UJJIVAN** — Ujjivan Financial delisted after reverse merger into UJJIVANSFB (already present)
+- **VARUNBEV** — duplicate of VBL (wrong sym)
+- **WELSPUNIND** — renamed Welspun Living — WELSPUNLIV already present
+- **ZOMATO** — renamed Eternal — ETERNAL arrives via admits
+
+## Fixed in place
+
+- **ALOKTEXT** → `ALOKINDS|Alok Industries|Textile|ALOKINDS.NS`
+- **ANURAS** → `ANURAS|Anupam Rasayan India|Chemicals|ANURAS.NS`
+- **BOROLT** → `BOROLTD|Borosil|Consumer|BOROLTD.NS`
+- **ION** → `IONEXCHANG|Ion Exchange India|Chemicals|IONEXCHANG.NS`
+- **LODHA** → `LODHA|Lodha Developers|Realty|LODHA.NS`
+- **NSLNISP** → `NSLNISP|NMDC Steel|Metal/PSU|NSLNISP.NS`
+- **PRISM** → `PRISMJOHNS|Prism Johnson|Cement|PRISMJOHNS.NS`
+
+## Flagged — kept, but run ugAuditUniverse() to verify empirically
+
+- **ARCHIES** — microcap; verify liquidity
+- **COMPUSOFT** — obscure microcap; verify listing
+- **DBREALTY** — renamed Valor Estate 2024; sym may have changed
+- **KARTIKAYS** — unclear entity; verify listing
+- **PILOTSQUAD** — sym unverified for Pilot Industries
+- **PRAXIS** — penny stock; verify still trading
+- **SMLISUZU** — M&M acquisition 2025; verify sym unchanged
+- **TAKE** — troubled microcap; verify still trading
+- **TIPSINDLTD** — Tips Industries renamed Tips Music (TIPSMUSIC); sym may have changed
+- **XCHANGING** — possibly delisted after DXC open offer
+
+## Overflow beyond the 120-admit cap (screen in the residual run)
+
+- LGEINDIA (LG Electronics India Ltd.)
+- LTF (L&T Finance Ltd.)
+- LTFOODS (LT Foods Ltd.)
+- LTM (LTM Ltd.)
+- M&MFIN (Mahindra & Mahindra Financial Services Ltd.)
+- MAPMYINDIA (C.E. Info Systems Ltd.)
+- MAZDOCK (Mazagoan Dock Shipbuilders Ltd.)
+- MEESHO (Meesho Ltd.)
+- MINDACORP (Minda Corporation Ltd.)
+- MOTILALOFS (Motilal Oswal Financial Services Ltd.)
+- MRF (MRF Ltd.)
+- MRPL (Mangalore Refinery & Petrochemicals Ltd.)
+- MSUMI (Motherson Sumi Wiring India Ltd.)
+- NAM-INDIA (Nippon Life India Asset Management Ltd.)
+- NAVA (Nava Ltd.)
+- NBCC (NBCC (India) Ltd.)
+- NETWEB (Netweb Technologies India Ltd.)
+- NEULANDLAB (Neuland Laboratories Ltd.)
+- NEWGEN (Newgen Software Technologies Ltd.)
+- NH (Narayana Hrudayalaya Ltd.)
+- NIVABUPA (Niva Bupa Health Insurance Company Ltd.)
+- NLCINDIA (NLC India Ltd.)
+- NTPCGREEN (NTPC Green Energy Ltd.)
+- NUVAMA (Nuvama Wealth Management Ltd.)
+- OIL (Oil India Ltd.)
+- ONESOURCE (Onesource Specialty Pharma Ltd.)
+- PARADEEP (Paradeep Phosphates Ltd.)
+- PATANJALI (Patanjali Foods Ltd.)
+- PAYTM (One 97 Communications Ltd.)
+- PCBL (PCBL Chemical Ltd.)
+- PGEL (PG Electroplast Ltd.)
+- PINELABS (Pine Labs Ltd.)
+- PIRAMALFIN (Piramal Finance Ltd.)
+- POLYMED (Poly Medicure Ltd.)
+- POWERINDIA (Hitachi Energy India Ltd.)
+- PPLPHARMA (Piramal Pharma Ltd.)
+- PREMIERENE (Premier Energies Ltd.)
+- PTCIL (PTC Industries Ltd.)
+- PWL (Physicswallah Ltd.)
+- RAILTEL (Railtel Corporation Of India Ltd.)
+- RAINBOW (Rainbow Childrens Medicare Ltd.)
+- RAMCOCEM (The Ramco Cements Ltd.)
+- RBLBANK (RBL Bank Ltd.)
+- REDINGTON (Redington Ltd.)
+- RHIM (RHI MAGNESITA INDIA LTD.)
+- RKFORGE (Ramkrishna Forgings Ltd.)
+- RPOWER (Reliance Power Ltd.)
+- RRKABEL (R R Kabel Ltd.)
+- SAGILITY (Sagility Ltd.)
+- SAILIFE (Sai Life Sciences Ltd.)
+- SAMMAANCAP (Sammaan Capital Ltd.)
+- SBFC (SBFC Finance Ltd.)
+- SCHAEFFLER (Schaeffler India Ltd.)
+- SCHNEIDER (Schneider Electric Infrastructure Ltd.)
+- SIGNATURE (Signatureglobal (India) Ltd.)
+- SONATSOFTW (Sonata Software Ltd.)
+- SPLPETRO (Supreme Petrochem Ltd.)
+- SRF (SRF Ltd.)
+- STARHEALTH (Star Health and Allied Insurance Company Ltd.)
+- SUNTV (Sun TV Network Ltd.)
+- SUZLON (Suzlon Energy Ltd.)
+- SWANCORP (Swan Corp Ltd.)
+- SWIGGY (Swiggy Ltd.)
+- SYRMA (Syrma SGS Technology Ltd.)
+- TARIL (Transformers And Rectifiers (India) Ltd.)
+- TATACAP (Tata Capital Ltd.)
+- TATACHEM (Tata Chemicals Ltd.)
+- TATAINVEST (Tata Investment Corporation Ltd.)
+- TATATECH (Tata Technologies Ltd.)
+- TECHNOE (Techno Electric & Engineering Company Ltd.)
+- TEGA (Tega Industries Ltd.)
+- TEJASNET (Tejas Networks Ltd.)
+- TENNIND (Tenneco Clean Air India Ltd.)
+- THELEELA (Leela Palaces Hotels & Resorts Ltd.)
+- TIMKEN (Timken India Ltd.)
+- TITAGARH (Titagarh Rail Systems Ltd.)
+- TMCV (Tata Motors Ltd.)
+- TMPV (Tata Motors Passenger Vehicles Ltd.)
+- TRAVELFOOD (Travel Food Services Ltd.)
+- TRITURBINE (Triveni Turbine Ltd.)
+- UBL (United Breweries Ltd.)
+- URBANCO (Urban Company Ltd.)
+- USHAMART (Usha Martin Ltd.)
+- VMM (Vishal Mega Mart Ltd.)
+- VTL (Vardhman Textiles Ltd.)
+- WAAREEENER (Waaree Energies Ltd.)
+- WOCKPHARMA (Wockhardt Ltd.)
+- ZFCVINDIA (ZF Commercial Vehicle Control Systems India Ltd.)
+- ZYDUSWELL (Zydus Wellness Ltd.)
+
+## Ticker continuations added without re-screening (same company, corrected sym)
+- `MAZDOCK|Mazagon Dock Shipbuilders|Defence|MAZDOCK.NS`
+- `NLCINDIA|NLC India|Power/PSU|NLCINDIA.NS`
+- `LTM|LTIMindtree (LTM)|IT|LTM.NS`
+- `PCBL|PCBL Chemical|Chemicals|PCBL.NS`
+- `POLYMED|Poly Medicure|Medical Devices|POLYMED.NS`
+- `SAMMAANCAP|Sammaan Capital|Housing Finance|SAMMAANCAP.NS`
+
+*(TMCV/TMPV — the Tata Motors demerger twins — are genuinely new listings and go through the gate in the residual run like the other 81.)*
