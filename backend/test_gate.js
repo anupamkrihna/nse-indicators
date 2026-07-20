@@ -2,7 +2,8 @@
    Sources the PURE FUNCTIONS block verbatim. Node-only. */
 var fs = require('fs');
 var src = fs.readFileSync('UniverseGate.gs', 'utf8');
-var cfg = src.match(/var UG_INDEX_CSV[\s\S]*?var UG_SHEET[^;]*;/);
+var src0 = src;
+var cfg = src.match(/var UG_EMBEDDED_DATE[\s\S]*?var UG_SHEET[^;]*;/);
 var m = src.match(/\/\* ══════════════ PURE FUNCTIONS[\s\S]*?(?=\/\* ══════════════ GAS-ONLY)/);
 if (!m || !cfg) { console.error('✗ source blocks not found'); process.exit(1); }
 eval(cfg[0]); eval(m[0]);
@@ -26,6 +27,22 @@ T('csv: EQ rows parsed', parsed.length === 3);
 T('csv: BE series excluded', !parsed.some(function(c){ return c.sym === 'BESTOCK'; }));
 T('csv: quoted comma name intact', parsed.some(function(c){ return c.sym === 'QCOMMA' && c.name === 'Quoted, Comma Co Ltd.'; }));
 T('csv: fields mapped', parsed[0].sym === 'GAYAPROJ' && parsed[0].isin === 'INE336H01023' && parsed[0].industry === 'CONSTRUCTION');
+var dummyCsv = 'Company Name,Industry,Symbol,Series,ISIN Code\nDummy Hindustan Unilever Ltd.,Fast Moving Consumer Goods,DUMMYHDLVR,EQ,DUM030A01027\nReal Co Ltd.,Services,REALCO,EQ,INE999999999\n';
+var dp = ugParseCsv_(dummyCsv);
+T('csv: NSE DUMMY placeholder rows rejected', dp.length === 1 && dp[0].sym === 'REALCO');
+
+/* embedded snapshot integrity (v1.2) */
+(function(){
+  var em = src0.match(/var UG_EMBEDDED_CSV = ("[\s\S]*?");\n/);
+  if (!em) { console.log('  ✗ embedded CSV not found'); bad++; n++; return; }
+  var parsedEm = ugParseCsv_(JSON.parse(em[1]));
+  T('embedded: exactly 500 constituents', parsedEm.length === 500);
+  var s = {}; parsedEm.forEach(function(c){ s[c.sym] = 1; });
+  T('embedded: no duplicate symbols', Object.keys(s).length === 500);
+  T('embedded: spans all three tiers', s['RELIANCE'] === 1 && s['COCHINSHIP'] === 1 && s['ZENTEC'] === 1);
+  T('embedded: current-vintage names present (2025-26 IPOs & renames)', s['GROWW'] === 1 && s['LENSKART'] === 1 && s['TMCV'] === 1 && s['MEESHO'] === 1);
+  T('embedded: every row carries an ISIN', parsedEm.every(function(c){ return /^IN/.test(c.isin); }));
+})();
 
 /* ── gate: clean liquid stock → ADMIT ── */
 var ts = series(weekSteps(400));
@@ -89,6 +106,16 @@ var sn = ugSnippet_({ sym:'KIRLOSENG', name:'Kirloskar Oil Engines Ltd.', indust
 T('snippet: steam.html format', sn === "  'KIRLOSENG':{n:'Kirloskar Oil Engines',yf:'KIRLOSENG.NS',s:'Capital Goods'},");
 var sn2 = ugSnippet_({ sym:'DOL', name:"D'Ollywood Ltd", industry:'MEDIA' });
 T('snippet: apostrophe escaped', sn2.indexOf("D\\'Ollywood") >= 0);
+
+/* ── rebalance reminder (v1.3) ── */
+(function(){
+  var rm = src0.match(/function ugIsRebalanceMonth_[\s\S]*?\n}/);
+  if (!rm) { console.log('  ✗ ugIsRebalanceMonth_ not found'); bad++; n++; return; }
+  var f = eval('(' + rm[0].replace('function ugIsRebalanceMonth_', 'function ') + ')');
+  T('reminder: April fires', f(3) === true);
+  T('reminder: October fires', f(9) === true);
+  T('reminder: other months silent', [0,1,2,4,5,6,7,8,10,11].every(function(m){ return f(m) === false; }));
+})();
 
 console.log((bad ? '✗ ' + bad + ' of ' : '✓ all ') + n + ' assertions ' + (bad ? 'FAILED' : 'passed'));
 process.exit(bad ? 1 : 0);
