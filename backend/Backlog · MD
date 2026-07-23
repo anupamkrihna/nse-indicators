@@ -1,0 +1,23 @@
+# NSE Dashboard — Backlog
+
+## BUG-001 · Sector PE shows negative (-204.4x) in Steam Gauge valuation panel
+**Severity:** medium (visible, misleads the valuation read; does not corrupt data)
+**Where:** steam.html — Buffett/Steam "Valuation stretch" panel; sector-PE aggregation (Upstox key-ratios `sectorPE`, or a local aggregate).
+**Observed:** HAPPSTMNDS (IT), 2026-07-23 — panel showed "Sector avg PE: -204.4x" and EPS "—". A negative sector PE is nonsensical.
+**Root cause (hypothesis):** simple-mean aggregation of constituent P/Es (or aggregate price ÷ aggregate EPS) where one or more loss-making constituents carry negative or near-zero EPS. A single large-negative or near-zero-EPS name drags a mean PE negative or explodes it. Universe expansion made this more frequent (more constituents per sector → higher chance of a loss-maker in the bucket).
+**Fix options (in order of preference):**
+1. **Exclude non-positive-earnings constituents** from the sector-PE aggregate (standard index practice — negative-PE names are simply dropped from the PE calc).
+2. Use **median** constituent PE instead of mean (robust to outliers and loss-makers).
+3. If using aggregate price/earnings, **floor aggregate EPS at a small positive** and flag as "n/m" (not meaningful) when the pool has too few positive-earnings names.
+**Additional:** when sector PE is unavailable/not-meaningful, show "n/m" rather than a negative number, and skip the "PE X is reasonable vs sector Y" sentence.
+**Effort:** small — isolated to the sector-PE computation + one display guard. Node-testable in a stub with a loss-maker fixture.
+**Independent of:** universe expansion. Can be done any time.
+
+## FEATURE-001 · Single source of truth for the universe (steam ← Indicators)
+**Context:** steam.html STOCK_MASTER (717) and Indicators UNIVERSE (798) are hand-maintained and drift (found ~52-name drift during Tranche 1). 
+**Proposal:** steam.html fetches its universe from the Indicators `?action=universe` route at load; UNIVERSE constant becomes the single canon. Eliminates drift permanently.
+**Effort:** small-medium. Deferred — nice-to-have, not blocking.
+
+## Milestone log
+- 2026-07-23 · Universe 798/1000 · Nifty 500 + Microcap 250 fully absorbed, gate-screened. runScan 165s, Cross Radar reads clean. No split-scan or cache-chunking needed.
+- Remaining to 1000: ~200 hand-picked (Nifty Total Market tail / defence / SME) — different sourcing (no clean index CSV); expect the gate's REJECT column to see real action in deep smallcaps.
