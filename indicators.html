@@ -970,7 +970,7 @@ function bsFetch_(sym){
   sym=String(sym||'').toUpperCase().trim().replace(/\.(NS|BO)$/,'');
   if(!sym) return Promise.resolve(null);
   if(BS[sym] && !BS[sym].pending && !BS[sym].error) return Promise.resolve(BS[sym]);
-  if(BS[sym] && BS[sym].pending) return BS[sym].pending;
+  if(BS[sym] && BS[sym].pending && typeof BS[sym].pending.then==='function') return BS[sym].pending;
   var run=function(){
     bsActive++;
     var u=UNIMAP[sym], name=u&&u.name?u.name:sym;
