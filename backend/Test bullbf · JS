@@ -180,7 +180,7 @@ function bbClassifyAt_(cl, e20, e50, e200, adxRegime, macdObj, rvolV, obvTrendV,
   if (obvTrendV === 'rising') confirms++;
   if (rsiV != null && rsiV >= 40 && rsiV <= 80) confirms++;
   var grade = cls === 'CAUTION' ? 'C' : (trending && confirms >= 2 ? 'A' : 'B');
-  return { on: true, cls: cls, grade: grade, ext200: ext200, stacked: stacked };
+  return { on: true, cls: cls, grade: grade, why: why, ext200: ext200, stacked: stacked };
 }
 function bbRate_(rows) { if (!rows.length) return null; var h = 0; for (var i = 0; i < rows.length; i++) h += (rows[i].fwd >= 0 ? 1 : 0); return h / rows.length; }
 function bbMeanFwd_(rows) { if (!rows.length) return null; var s = 0; for (var i = 0; i < rows.length; i++) s += rows[i].fwd; return s / rows.length; }
@@ -225,31 +225,62 @@ function bbClusterStats_(rows, clusterKey, clsA, clsB) {
   var m = {}, keys = [];
   rows.forEach(function (r) {
     var k = String(r[clusterKey]);
-    if (!m[k]) { m[k] = { aH: 0, aN: 0, bH: 0, bN: 0 }; keys.push(k); }
+    if (!m[k]) { m[k] = { aH: 0, aN: 0, aS: 0, bH: 0, bN: 0, bS: 0 }; keys.push(k); }
     var held = r.fwd >= 0 ? 1 : 0;
-    if (r.cls === clsA) { m[k].aN++; m[k].aH += held; }
-    if (clsB === '*') { m[k].bN++; m[k].bH += held; }
-    else if (r.cls === clsB) { m[k].bN++; m[k].bH += held; }
+    if (r.cls === clsA) { m[k].aN++; m[k].aH += held; m[k].aS += r.fwd; }
+    if (clsB === '*') { m[k].bN++; m[k].bH += held; m[k].bS += r.fwd; }
+    else if (r.cls === clsB) { m[k].bN++; m[k].bH += held; m[k].bS += r.fwd; }
   });
   return keys.map(function (k) { return m[k]; });
 }
-function bbBootstrapCI_(rows, clusterKey, clsA, clsB, iters, rng) {
+function bbMeanSpread_(rows, clsA, clsB) {
+  var a = rows.filter(function (r) { return r.cls === clsA; });
+  var b = (clsB === '*') ? rows : rows.filter(function (r) { return r.cls === clsB; });
+  var ma = bbMeanFwd_(a), mb = bbMeanFwd_(b);
+  if (ma == null || mb == null) return null;
+  return ma - mb;
+}
+function bbBucketOf_(why) {
+  var w = String(why || '');
+  if (!w) return '';
+  var has = function (c) { return w.split(',').indexOf(c) >= 0; };
+  if (has('below20')) return 'C_PULLBACK';
+  if (has('ext') || has('rsi80')) return 'C_EXTENDED';
+  if (has('div')) return 'C_DIVERGENCE';
+  return 'C_OTHER';
+}
+function bbTag_(rows, tagFn, horizonKey) {
+  var out = [];
+  rows.forEach(function (r) {
+    var g = tagFn(r); if (!g) return;
+    var f = r[horizonKey];
+    if (f == null || f === '') return;
+    out.push({ sym: r.sym, date: r.date, cls: g, fwd: Number(f) });
+  });
+  return out;
+}
+function bbSubsample_(rows, startIdx, stride) {
+  return rows.filter(function (r) { return ((Number(r.t) - startIdx) % stride) === 0; });
+}
+function bbBootstrapCI_(rows, clusterKey, clsA, clsB, iters, rng, metric) {
   iters = iters || BBCFG.BOOT_ITERS;
   rng = rng || bbRng_(BBCFG.BOOT_SEED);
+  metric = metric || 'hold';
   var stats = bbClusterStats_(rows, clusterKey, clsA, clsB), K = stats.length;
   if (K < 2) return null;
-  var point = bbSpread_(rows, clsA, clsB), draws = [];
+  var point = (metric === 'mean') ? bbMeanSpread_(rows, clsA, clsB) : bbSpread_(rows, clsA, clsB);
+  var draws = [];
   for (var it = 0; it < iters; it++) {
-    var aH = 0, aN = 0, bH = 0, bN = 0;
-    for (var j = 0; j < K; j++) { var g = stats[Math.floor(rng() * K)]; aH += g.aH; aN += g.aN; bH += g.bH; bN += g.bN; }
+    var aH = 0, aN = 0, aS = 0, bH = 0, bN = 0, bS = 0;
+    for (var j = 0; j < K; j++) { var g = stats[Math.floor(rng() * K)]; aH += g.aH; aN += g.aN; aS += g.aS; bH += g.bH; bN += g.bN; bS += g.bS; }
     if (!aN || !bN) continue;
-    draws.push(aH / aN - bH / bN);
+    draws.push(metric === 'mean' ? (aS / aN - bS / bN) : (aH / aN - bH / bN));
   }
   if (draws.length < 100) return null;
   draws.sort(function (x, y) { return x - y; });
   function pct(p) { return draws[Math.min(draws.length - 1, Math.max(0, Math.floor(p * draws.length)))]; }
   return { point: point == null ? null : Math.round(point * 10000) / 10000, lo: Math.round(pct(0.025) * 10000) / 10000,
-    hi: Math.round(pct(0.975) * 10000) / 10000, iters: draws.length, clusters: K };
+    hi: Math.round(pct(0.975) * 10000) / 10000, iters: draws.length, clusters: K, metric: metric };
 }
 function bbVerdict_(ciStock, ciDate) {
   if (!ciStock || !ciDate) return { pass: false, text: 'insufficient data' };
@@ -449,6 +480,77 @@ console.log('\n── optimised bootstrap == naive bootstrap ──');
   var ms = Date.now() - t0;
   console.log('   (86k episodes, 2000 iters, 799 clusters → ' + ms + 'ms)');
   ok('full-scale bootstrap completes well inside the GAS budget', ms < 20000 && res != null);
+})();
+
+console.log('\n── v1.1: trigger buckets ──');
+ok('below20 → PULLBACK', bbBucketOf_('below20') === 'C_PULLBACK');
+ok('ext → EXTENDED', bbBucketOf_('ext') === 'C_EXTENDED');
+ok('rsi80 → EXTENDED', bbBucketOf_('rsi80') === 'C_EXTENDED');
+ok('div alone → DIVERGENCE', bbBucketOf_('div') === 'C_DIVERGENCE');
+ok('breakdown takes precedence over extension', bbBucketOf_('ext,below20') === 'C_PULLBACK');
+ok('multi-extension still EXTENDED', bbBucketOf_('div,ext,rsi80') === 'C_EXTENDED');
+ok('empty why → no bucket', bbBucketOf_('') === '');
+ok('buckets are mutually exclusive', ['below20','ext','rsi80','div'].map(bbBucketOf_).filter(function(v,i,a){return a.indexOf(v)!==i;}).length === 1);
+
+console.log('\n── v1.1: classifier emits trigger codes matching bullPack_ reasons ──');
+(function(){
+  var mism = 0, checked = 0, cautions = 0;
+  for (var seed = 1; seed <= 60; seed++) {
+    var s = series(seed * 3301, 340, 0.0030, 0.030), cl = s.close, vol = s.volume;
+    var e20 = ema(cl,20), e50 = ema(cl,50), e200 = ema(cl,200), rsiArr = rsiSeries(cl,14);
+    var reg = adxRegimeFake(seed);
+    var live = bullPack_(cl, e20, e50, e200, reg, null, macdPack(cl), rvol20(vol),
+      obvPack(cl, vol).trend, rsiArr[cl.length-1], bearishDivergence(cl, rsiArr, 60));
+    var idx = cl.length - 1, macdS = bbMacdSeries_(cl, ema), obv = bbObvSeries_(cl, vol);
+    var bf = bbClassifyAt_(cl, e20, e50, e200, reg, bbMacdAt_(macdS.hist, idx), bbRvolAt_(vol, idx),
+      bbObvTrendAt_(obv, idx), rsiArr[idx], bbDivergenceAt_(cl, rsiArr, idx, 60), idx);
+    if (!live.on || !bf.on) continue;
+    checked++;
+    if (live.cls === 'CAUTION') cautions++;
+    if (live.reasons.length !== bf.why.length) mism++;
+  }
+  console.log('   (' + checked + ' on-board, ' + cautions + ' CAUTION)');
+  ok('trigger COUNT matches bullPack_ reasons in every case', mism === 0);
+  ok('CAUTION branch was exercised', cautions >= 3);
+})();
+
+console.log('\n── v1.1: mean-difference bootstrap ──');
+(function(){
+  var rows = [], r = mkRng(31), dates = ['d1','d2','d3','d4','d5','d6'];
+  // equal hold rates, but B has much fatter winners → mean differs, hold does not
+  for (var i = 0; i < 50; i++) for (var d = 0; d < dates.length; d++) {
+    rows.push({ sym:'A'+i, date:dates[d], cls:'A', fwd: r() < 0.55 ?  0.02 : -0.02 });
+    rows.push({ sym:'B'+i, date:dates[d], cls:'B', fwd: r() < 0.55 ?  0.09 : -0.02 });
+  }
+  var h = bbBootstrapCI_(rows, 'date', 'A', 'B', 400, bbRng_(3), 'hold');
+  var m = bbBootstrapCI_(rows, 'date', 'A', 'B', 400, bbRng_(3), 'mean');
+  ok('hold spread ≈ 0 (identical win rates)', Math.abs(h.point) < 0.05);
+  ok('mean spread is clearly negative (B wins bigger)', m.hi < 0);
+  ok('metric is recorded on the result', h.metric === 'hold' && m.metric === 'mean');
+  ok('mean point matches bbMeanSpread_', Math.abs(m.point - bbMeanSpread_(rows,'A','B')) < 1e-4);
+  ok('THE v1.0 BLIND SPOT: hold-rate CI alone would have missed it', h.lo <= 0 && h.hi >= 0 && m.hi < 0);
+})();
+
+console.log('\n── v1.1: tagging + subsampling ──');
+(function(){
+  var rows = [
+    { sym:'A', date:'d1', t:210, cls:'CAUTION', grade:'C', why:'ext',      fwd21: 0.05, fwd63: 0.10 },
+    { sym:'A', date:'d2', t:231, cls:'CAUTION', grade:'C', why:'below20',  fwd21:-0.03, fwd63: null },
+    { sym:'A', date:'d3', t:252, cls:'STRONG',  grade:'A', why:'',         fwd21: 0.01, fwd63: 0.02 },
+    { sym:'A', date:'d4', t:273, cls:'OFF',     grade:'',  why:'',         fwd21: 0.02, fwd63: 0.03 }
+  ];
+  var tagged = bbTag_(rows, function(r){ return r.cls==='STRONG' ? 'STRONG' : (r.cls==='CAUTION' ? bbBucketOf_(r.why) : ''); }, 'fwd21');
+  ok('OFF rows dropped by the tagger', tagged.length === 3);
+  ok('CAUTION relabelled to its bucket', tagged.filter(function(x){return x.cls==='C_EXTENDED';}).length === 1);
+  ok('pullback bucket separated', tagged.filter(function(x){return x.cls==='C_PULLBACK';}).length === 1);
+  var t63 = bbTag_(rows, function(r){ return r.cls==='STRONG' ? 'S' : 'X'; }, 'fwd63');
+  ok('rows with a null horizon are dropped', t63.length === 3);
+  var sub = bbSubsample_(rows, 210, 63);
+  ok('stride-63 subsample keeps every third bar (t=210, t=273)',
+    sub.length === 2 && sub[0].t === 210 && sub[1].t === 273);
+  ok('  and drops the overlapping ones (t=231, t=252)',
+    sub.filter(function (x) { return x.t === 231 || x.t === 252; }).length === 0);
+  ok('  spacing between kept bars equals the long horizon', (sub[1].t - sub[0].t) === 63);
 })();
 
 console.log(fails ? ('\n' + fails + ' FAILURE(S)') : '\nALL PASS');
