@@ -155,7 +155,7 @@ tr.gated{ opacity:.58; }
   <div class="tab" data-tab="sell">📉 Sell Watch</div>
   <div class="tab" data-tab="bull">🐂 Bull Watch</div>
   <div class="tab" data-tab="sheep">🐏 Black Sheep</div>
-  <div class="tab" data-tab="calib">🧭 Sell Calibration</div>
+  <div class="tab" data-tab="calib">🧭 Calibration / Health</div>
 </div>
 
 <div class="wrap">
@@ -301,6 +301,41 @@ tr.gated{ opacity:.58; }
       <div class="showing" id="cbLegend"></div>
     </div>
     <div class="sl-legend" id="cbRead"><b>How to read:</b> each bubble is a prediction decile (size = episode count). On the dashed diagonal, the model is honest — a 60% call falls 60% of the time. Below the diagonal = overconfident. The gold line is the promoted champion map: what each raw probability is corrected to before display. Bubbles hugging the diagonal after correction is the goal.</div>
+
+    <!-- ── Bull Watch health (additive · action=health) ── -->
+    <div style="margin-top:22px;border-top:1px solid var(--line,#e6e9f0);padding-top:16px">
+      <h3 style="margin:0 0 8px">🐂 Bull Watch — calibration &amp; class health</h3>
+      <div class="status" id="hbStatus">loading…</div>
+      <div class="cb-cards">
+        <div class="cb-card"><div class="cb-k">P(hold) Brier</div><div class="cb-v" id="hbBrier">–</div></div>
+        <div class="cb-card"><div class="cb-k">Episodes scored</div><div class="cb-v" id="hbN">–</div></div>
+        <div class="cb-card"><div class="cb-k">Scored</div><div class="cb-v" id="hbAt" style="font-size:15px">–</div></div>
+      </div>
+      <div class="board">
+        <h3>Forward outcome by class · 21-session horizon</h3>
+        <div style="overflow:auto"><table><thead><tr>
+          <th>Class</th><th>Episodes</th><th>Hold rate</th><th>Mean forward return</th>
+        </tr></thead><tbody id="hbClassBody"><tr><td colspan="4" class="mut">no bull results yet</td></tr></tbody></table></div>
+      </div>
+      <div class="sl-legend"><b>How to read:</b> Bull Watch is a deterministic 20/50/200-DMA classifier, so there is no probability to calibrate directly — its honest health check is whether the classes separate outcomes. STRONG should show a higher hold rate and mean forward return than BULL, and BULL higher than CAUTION; if CAUTION is out-holding STRONG the classifier has drifted. The Brier scores the P(hold·21d) column the board already shows (1 − bootstrap P(fall)). Populates as predictions mature (~4–5 weeks after daily logging starts).</div>
+    </div>
+
+    <!-- ── Black Sheep roster health (additive · action=health) ── -->
+    <div style="margin-top:22px;border-top:1px solid var(--line,#e6e9f0);padding-top:16px">
+      <h3 style="margin:0 0 8px">🐏 Black Sheep — roster drift watch</h3>
+      <div class="status" id="hsStatus">loading…</div>
+      <div class="cb-cards">
+        <div class="cb-card"><div class="cb-k">🐏 Black sheep</div><div class="cb-v" id="hsBlack">–</div></div>
+        <div class="cb-card"><div class="cb-k">⚠ Grey</div><div class="cb-v" id="hsGrey">–</div></div>
+        <div class="cb-card"><div class="cb-k">🟢 Clean</div><div class="cb-v" id="hsClean">–</div></div>
+        <div class="cb-card"><div class="cb-k">Last sweep</div><div class="cb-v" id="hsAt" style="font-size:15px">–</div></div>
+      </div>
+      <div class="board">
+        <h3>Newly flagged since last sweep</h3>
+        <div id="hsNewly" class="mut">—</div>
+      </div>
+      <div class="sl-legend"><b>How to read:</b> the weekly sweep re-scores the whole roster against the Steam Gauge black-sheep engine and diffs it against the prior week. <b>Newly flagged</b> names are the ones to act on — a clean stock that just tripped a suspension gap, relisting, or NCLT/SEBI flag (the Gayatri failure mode, caught on a schedule). A full 799-name sweep is budgeted and resumable; if a sweep is mid-flight, the counts reflect the last completed pass.</div>
+    </div>
   </div>
 
 </div>
@@ -327,6 +362,7 @@ document.querySelectorAll('.tab').forEach(function(t){
     if(t.dataset.tab==='bull') loadBull();
     if(t.dataset.tab==='sheep') loadSheep();
     if(t.dataset.tab==='calib' && !calibLoaded) loadCalib();
+    if(t.dataset.tab==='calib') loadHealth();
   });
 });
 
@@ -951,6 +987,51 @@ function qMiss_(q,cols){
 function jumpDive_(sym){
   var t=document.querySelector('.tab[data-tab=pf]'); if(t) t.click();
   openDive(sym);
+}
+
+/* ══════════════ unified health (additive · action=health) ══════════════ */
+function loadHealth(){
+  J(API+'?action=health').then(function(j){
+    if(!j||!j.ok){ hHealthErr_(); return; }
+    renderBullHealth_(j.bull);
+    renderSheepHealth_(j.sheep, j.sheepSweepIdx, j.lastHealthRun);
+  }).catch(function(){ hHealthErr_(); });
+}
+function hHealthErr_(){
+  $('hbStatus').textContent='✗ health route unreachable — deploy Health.gs + add the doGet dispatch line'; $('hbStatus').className='status err';
+  $('hsStatus').textContent='✗ health route unreachable'; $('hsStatus').className='status err';
+}
+function renderBullHealth_(b){
+  if(!b){ $('hbStatus').textContent='no bull results yet — predictions still maturing (~4–5 weeks after installHealthTrigger)'; $('hbStatus').className='status'; return; }
+  $('hbStatus').textContent='scored '+String(b.scoredAt).slice(0,10)+' · '+b.nScored+' matured episodes'; $('hbStatus').className='status';
+  $('hbBrier').textContent=b.brier==null?'–':b.brier;
+  $('hbN').textContent=b.nScored==null?'–':b.nScored;
+  $('hbAt').textContent=String(b.scoredAt).slice(0,10);
+  var t=b.classTable||{}, order=['STRONG','BULL','CAUTION'];
+  var rows=order.map(function(c){
+    var x=t[c]||{n:0,holdRate:null,meanFwd:null};
+    var hr=x.holdRate==null?'—':(Math.round(x.holdRate*1000)/10)+'%';
+    var mf=x.meanFwd==null?'—':(x.meanFwd>=0?'+':'')+(Math.round(x.meanFwd*1000)/10)+'%';
+    var cls=c==='STRONG'?'up':c==='CAUTION'?'dn':'gd';
+    return '<tr><td><b class="'+cls+'">'+c+'</b></td><td>'+x.n+'</td><td>'+hr+'</td><td>'+mf+'</td></tr>';
+  }).join('');
+  $('hbClassBody').innerHTML=rows||'<tr><td colspan="4" class="mut">no bull results yet</td></tr>';
+}
+function renderSheepHealth_(s, sweepIdx, lastRun){
+  if(!s){ $('hsStatus').textContent='no sweep completed yet — run runSheepHealth_() (resumable) or wait for Saturday'; $('hsStatus').className='status';
+    $('hsNewly').textContent='—'; return; }
+  var mid=(sweepIdx&&sweepIdx!=='0');
+  var total=(s.black||0)+(s.grey||0)+(s.clean||0)+(s.error||0);
+  $('hsStatus').textContent='last completed sweep '+String(s.checkedAt).slice(0,10)+' · '+(s.flaggedCount||0)+' flagged of '+total+' scanned'+(mid?' · a new sweep is mid-flight ('+sweepIdx+')':''); $('hsStatus').className='status';
+  $('hsBlack').textContent=s.black==null?'–':s.black;
+  $('hsGrey').textContent=s.grey==null?'–':s.grey;
+  $('hsClean').textContent=s.clean==null?'–':s.clean;
+  $('hsAt').textContent=String(s.checkedAt).slice(0,10);
+  var newly=(s.newly||[]), cleared=(s.cleared||[]), html='';
+  if(newly.length) html+='<div style="margin-bottom:6px"><b class="dn">🐏 '+newly.length+' newly flagged:</b> '+newly.map(esc).join(', ')+'</div>';
+  else html+='<div class="mut">no new flags since last sweep — roster stable</div>';
+  if(cleared.length) html+='<div class="mut" style="margin-top:4px">cleared: '+cleared.map(esc).join(', ')+'</div>';
+  $('hsNewly').innerHTML=html;
 }
 
 /* ══════════════ black sheep (v1.8 — additive) ══════════════ */
