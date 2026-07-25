@@ -76,6 +76,7 @@ tr.row:hover{ background:#faf7ef; cursor:pointer; }
 .bsv.clean{ background:#eef7f1; color:var(--bull); border:1px solid #bcd9c8; }
 .bsv.pend{ background:#f4f2ec; color:var(--muted); border:1px solid var(--edge); }
 .bschip{ font-size:11px; margin-left:5px; cursor:help; }
+.bs-news{margin-top:6px;padding-top:5px;border-top:1px dashed var(--line,#e6e9f0)}
 .bs-fl{ font-size:11.5px; margin:3px 0; line-height:1.45; }
 .bs-fl a{ color:inherit; text-decoration:underline; }
 .bs-fl .bs-t{ font-family:var(--mono); font-size:9px; font-weight:700; opacity:0.7; margin-right:5px; }
@@ -1077,7 +1078,10 @@ function bsChipHtml_(d){
   return '';
 }
 function bsFlagText_(d){
-  return (d.flags||[]).map(function(f){ return '['+f.sev+'] '+(f.text||f.label||f.code); }).join('\n') || 'flagged';
+  var v=(d.flags||[]).map(function(f){ return '['+f.sev+'] '+(f.text||f.label||f.code); });
+  var n=(d.newsContext||[]).map(function(f){ return '[news] '+(f.text||f.label||f.code); });
+  if(d.newsOk===false) n.push('[news] feed unavailable — context not checked');
+  return v.concat(n).join('\n') || 'flagged';
 }
 
 /* ① portfolio-add warning */
@@ -1140,7 +1144,7 @@ function renderSheep_(){
     var d=BS[sym], u=UNIMAP[sym];
     var nm=u&&u.name?u.name:'', sec=u&&u.sector?u.sector:(nm?'':'outside the 438 universe');
     var head='<td><span class="sym">'+esc(sym)+'</span>'+(nm?'<br><span class="mut">'+esc(nm)+'</span>':'<br><span class="mut">'+esc(sec)+'</span>')+'</td>';
-    if(!d||d.pending) return '<tr>'+head+'<td><span class="bsv pend">checking…</span></td><td class="mut">price scan + regulatory news scan running</td><td class="mut">—</td></tr>';
+    if(!d||d.pending) return '<tr>'+head+'<td><span class="bsv pend">checking…</span></td><td class="mut">structural scan running · news pulled as context</td><td class="mut">—</td></tr>';
     if(d.verdict==='ERROR') return '<tr>'+head+'<td><span class="bsv pend">error</span></td><td class="mut">'+esc(d.error||'engine unreachable')+'</td><td class="mut">—</td></tr>';
     var pill = d.verdict==='BLACKSHEEP'?'<span class="bsv sheep">🐏 BLACK SHEEP</span>'
              : d.verdict==='GREY'?'<span class="bsv grey">⚠ GREY</span>'
@@ -1152,7 +1156,17 @@ function renderSheep_(){
           if(f.url) txt='<a href="'+esc(f.url)+'" target="_blank" rel="noopener">'+txt+'</a>';
           return '<div class="bs-fl"><span class="bs-t">['+(tn[f.tier]||f.tier)+' · '+esc(f.sev)+']</span>'+txt+(f.date?' <span class="mut">('+esc(f.date)+')</span>':'')+'</div>';
         }).join('')
-      : '<span class="mut">no data gaps, no red-flag news'+(d.bars?' · '+d.bars+' clean bars':'')+'</span>';
+      : '<span class="mut">structurally sound'+(d.bars?' · '+d.bars+' clean bars':'')+'</span>';
+    var nc=(d.newsContext&&d.newsContext.length)
+      ? '<div class="bs-news"><span class="bs-t">REG/NEWS · context only, does not affect the verdict</span>'
+        + d.newsContext.map(function(f){
+            var t=esc(f.text||f.label||f.code);
+            if(f.url) t='<a href="'+esc(f.url)+'" target="_blank" rel="noopener">'+t+'</a>';
+            return '<div class="bs-fl mut">'+t+(f.date?' <span class="mut">('+esc(f.date)+')</span>':'')+'</div>';
+          }).join('')
+        + '</div>'
+      : (d.newsOk===false ? '<div class="bs-news mut"><span class="bs-t">REG/NEWS</span>feed unavailable — context not checked</div>' : '');
+    fl = fl + nc;
     var when=(d.checkedAt?String(d.checkedAt).slice(0,16).replace('T',' '):'—')+(d.cached?' <span class="mut">(cached)</span>':'');
     return '<tr>'+head+'<td>'+pill+'</td><td>'+fl+'</td><td class="mut" style="font-size:11px">'+when+'</td></tr>';
   }).join('');
