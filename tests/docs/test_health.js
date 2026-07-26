@@ -3,7 +3,10 @@
 
 // ---- copies of the pure functions under test (kept byte-identical to Health.gs) ----
 function bullClassTable_(rows) {
-  var C = { STRONG: [], BULL: [], CAUTION: [] };
+  /* v1.1 (26-Jul-2026): CAUTION was retired in bullPack_ and split into
+     EXTENDED / WEAKENING / PULLBACK — see docs/DECISIONS.md D-005. CAUTION is
+     still bucketed so that rows logged before the change remain readable. */
+  var C = { STRONG: [], BULL: [], EXTENDED: [], WEAKENING: [], PULLBACK: [], CAUTION: [] };
   (rows || []).forEach(function (r) { if (C[r.cls]) C[r.cls].push(r); });
   function agg(a) {
     if (!a.length) return { n: 0, holdRate: null, meanFwd: null };
@@ -11,7 +14,9 @@ function bullClassTable_(rows) {
     for (var i = 0; i < a.length; i++) { h += a[i].held; f += a[i].fwd; }
     return { n: a.length, holdRate: Math.round(h / a.length * 1000) / 1000, meanFwd: Math.round(f / a.length * 10000) / 10000 };
   }
-  return { STRONG: agg(C.STRONG), BULL: agg(C.BULL), CAUTION: agg(C.CAUTION) };
+  var out = {};
+  Object.keys(C).forEach(function (k) { out[k] = agg(C[k]); });
+  return out;
 }
 function sheepDiff_(prevFlagged, curr) {
   var prev = {};
@@ -44,10 +49,15 @@ function approx(a, b) { return Math.abs(a - b) < 1e-9; }
   ok('STRONG n counted', t.STRONG.n === 3);
   ok('STRONG holdRate = 2/3', approx(t.STRONG.holdRate, 0.667));
   ok('STRONG meanFwd', approx(t.STRONG.meanFwd, Math.round((0.08 + 0.04 - 0.02) / 3 * 10000) / 10000));
-  ok('CAUTION holdRate = 1/3', approx(t.CAUTION.holdRate, 0.333));
-  ok('health signal: STRONG holdRate > CAUTION holdRate', t.STRONG.holdRate > t.CAUTION.holdRate);
+  ok('CAUTION holdRate = 1/3 (legacy rows still bucketed)', approx(t.CAUTION.holdRate, 0.333));
+  ok('legacy CAUTION rows remain readable after the D-005 split', t.CAUTION.n === 3);
   ok('empty class → nulls, not NaN', bullClassTable_([]).STRONG.holdRate === null);
   ok('unknown class ignored', bullClassTable_([{ cls: 'ZZZ', held: 1, fwd: 1 }]).STRONG.n === 0);
+  var nu = bullClassTable_([
+    { cls: 'EXTENDED', held: 1, fwd: 0.05 }, { cls: 'PULLBACK', held: 0, fwd: -0.03 },
+    { cls: 'WEAKENING', held: 1, fwd: 0.01 }]);
+  ok('D-005 classes are bucketed', nu.EXTENDED.n === 1 && nu.PULLBACK.n === 1 && nu.WEAKENING.n === 1);
+  ok('EXTENDED and PULLBACK are kept separate', nu.EXTENDED.meanFwd !== nu.PULLBACK.meanFwd);
 })();
 
 // ── sheepDiff_ ───────────────────────────────────────────────────
