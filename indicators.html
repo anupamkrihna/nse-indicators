@@ -873,6 +873,8 @@ $('bullBody').addEventListener('click',function(e){
 function bullDiveBlock_(p){
   var bl=p.bull; if(!bl||!bl.on) return '';
   var hold=bl.pHold==null?'—':Math.round(bl.pHold*100)+'%', tail=bl.pullTail==null?'—':Math.round(bl.pullTail*100)+'%';
+  /* D-005: 'bull grade' clause removed — grade is now null (see Code.gs bullPack_) */
+  var extra=' Slopes '+bl.s20+'/'+bl.s50+'/'+bl.s200+' %/10d · extended <b>'+bl.ext200+'%</b> over the 200 · pullback landing zone ≈ the 50 DMA (<b>−'+bl.dist50+'%</b> from here) · continuation P(hold 21d) <b>'+hold+'</b> (bootstrap) · pullback P(&lt;−5%) <b>'+tail+'</b>.';
   var C = {
     STRONG:   ['up', '▲ STRONG', 'full stack in a trending regime — the cleanest trend configuration on the board.'],
     BULL:     ['gd', '▲ BULL', 'all three DMAs rising, but the stack or the trend regime is not yet complete.'],
