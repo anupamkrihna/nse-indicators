@@ -1,0 +1,175 @@
+/* test_vault.js — the vault must return EXACTLY what a live fetch would, or all
+   downstream research silently changes. Round-trip fidelity is the whole test. */
+
+var VCFG = { CELL_MAX: 45000 };
+
+function vEncodeDays_(tsArr) {
+  var out = [], prev = null;
+  for (var i = 0; i < tsArr.length; i++) {
+    if (tsArr[i] == null) return null;
+    var d = Math.floor(tsArr[i] / 86400);
+    out.push(prev === null ? d : d - prev);
+    prev = d;
+  }
+  return out.join(',');
+}
+function vDecodeDays_(str) {
+  var s = String(str || '').trim();
+  if (!s) return [];
+  var p = s.split(','), day = 0, out = [];
+  for (var i = 0; i < p.length; i++) {
+    var v = parseInt(p[i], 10);
+    if (isNaN(v)) return null;
+    day = (i === 0) ? v : day + v;
+    out.push(day * 86400);
+  }
+  return out;
+}
+function vEncodeNums_(arr, dp) {
+  var m = Math.pow(10, dp == null ? 2 : dp), out = [];
+  for (var i = 0; i < arr.length; i++) {
+    if (arr[i] == null || isNaN(arr[i])) return null;
+    out.push(Math.round(arr[i] * m) / m);
+  }
+  return JSON.stringify(out);
+}
+function vDecodeNums_(str) { try { var a = JSON.parse(str); return Array.isArray(a) ? a : null; } catch (e) { return null; } }
+function vFitCell_(ts, close, cellMax) {
+  cellMax = cellMax || VCFG.CELL_MAX;
+  var t = ts.slice(), c = close.slice(), trimmed = 0;
+  while (t.length > 300) {
+    var ec = vEncodeNums_(c, 2), ed = vEncodeDays_(t);
+    if (ec == null || ed == null) return null;
+    if (ec.length <= cellMax && ed.length <= cellMax) break;
+    var drop = Math.max(50, Math.floor(t.length * 0.05));
+    t = t.slice(drop); c = c.slice(drop); trimmed += drop;
+  }
+  return { ts: t, close: c, trimmed: trimmed };
+}
+function vMergeSeries_(oldTs, oldClose, newTs, newClose) {
+  var m = {}, i;
+  for (i = 0; i < oldTs.length; i++) m[Math.floor(oldTs[i] / 86400)] = oldClose[i];
+  for (i = 0; i < newTs.length; i++) m[Math.floor(newTs[i] / 86400)] = newClose[i];
+  var days = Object.keys(m).map(Number).sort(function (a, b) { return a - b; });
+  var ts = [], cl = [];
+  for (i = 0; i < days.length; i++) { ts.push(days[i] * 86400); cl.push(m[days[i]]); }
+  return { ts: ts, close: cl };
+}
+
+let fails = 0;
+function ok(n, c) { console.log((c ? 'PASS' : 'FAIL') + ' — ' + n); if (!c) fails++; }
+function rng(s) { var x = s; return function () { x = (1103515245 * x + 12345) % 2147483648; return x / 2147483648; }; }
+
+/* realistic 10y NSE-shaped series: ~250 bars/yr, weekend gaps, occasional holidays */
+function makeSeries(seed, years, startPrice) {
+  var r = rng(seed), ts = [], cl = [], p = startPrice;
+  var day = Math.floor(Date.UTC(2016, 0, 4) / 86400000);
+  var target = Math.round(years * 250);
+  while (ts.length < target) {
+    var dow = (day + 4) % 7;
+    if (dow < 5 && r() > 0.03) {                        // weekdays, 3% holidays
+      p = Math.max(1, p * (1 + (r() - 0.497) * 0.03));
+      ts.push(day * 86400 + 37800);                      // 10:30 UTC — intraday close time
+      cl.push(Math.round(p * 100) / 100);
+    }
+    day++;
+  }
+  return { ts: ts, close: cl };
+}
+
+console.log('── round-trip fidelity ──');
+(function () {
+  var s = makeSeries(11, 10, 1250.5);
+  var ed = vEncodeDays_(s.ts), ec = vEncodeNums_(s.close, 2);
+  var dt = vDecodeDays_(ed), dc = vDecodeNums_(ec);
+  ok('bar count preserved', dt.length === s.ts.length && dc.length === s.close.length);
+  ok('closes identical to 2dp', JSON.stringify(dc) === JSON.stringify(s.close));
+  var daysMatch = s.ts.every(function (t, i) { return Math.floor(t / 86400) === Math.floor(dt[i] / 86400); });
+  ok('every calendar DAY preserved', daysMatch);
+  ok('timestamps land on day boundaries (intraday time dropped by design)',
+    dt.every(function (t) { return t % 86400 === 0; }));
+  ok('date strings identical — what consumers actually use',
+    s.ts.every(function (t, i) {
+      return new Date(t * 1000).toISOString().slice(0, 10) === new Date(dt[i] * 1000).toISOString().slice(0, 10);
+    }));
+  console.log('   (' + s.ts.length + ' bars → days ' + ed.length + ' chars, close ' + ec.length + ' chars)');
+  ok('both cells inside the 45,000-char ceiling', ed.length < 45000 && ec.length < 45000);
+  ok('day-delta encoding is much cheaper than raw unix seconds',
+    ed.length < JSON.stringify(s.ts).length / 3);
+})();
+
+console.log('\n── encoding edge cases ──');
+ok('empty series', vDecodeDays_(vEncodeDays_([])).length === 0);
+ok('single bar', vDecodeDays_(vEncodeDays_([19723 * 86400]))[0] === 19723 * 86400);
+ok('null in ts rejected', vEncodeDays_([1, null, 3]) === null);
+ok('null in closes rejected', vEncodeNums_([1, null, 3], 2) === null);
+ok('malformed day string rejected', vDecodeDays_('12,abc,3') === null);
+ok('malformed close JSON rejected', vDecodeNums_('[1,2,') === null);
+ok('non-array JSON rejected', vDecodeNums_('{"a":1}') === null);
+ok('long gaps encode fine (suspension)', (function () {
+  var ts = [19000 * 86400, 19001 * 86400, 19400 * 86400];
+  var d = vDecodeDays_(vEncodeDays_(ts));
+  return d.length === 3 && d[2] === 19400 * 86400;
+})());
+ok('high-priced stock keeps 2dp (MRF-like)',
+  vDecodeNums_(vEncodeNums_([152340.55, 151002.1], 2))[0] === 152340.55);
+
+console.log('\n── cell-ceiling guard ──');
+(function () {
+  var s = makeSeries(22, 10, 1000);
+  var fit = vFitCell_(s.ts, s.close, 45000);
+  ok('a normal 10y series is NOT trimmed', fit.trimmed === 0 && fit.ts.length === s.ts.length);
+  var tight = vFitCell_(s.ts, s.close, 4000);            // force the guard to bite
+  ok('an oversized series IS trimmed', tight.trimmed > 0);
+  ok('trimming keeps the MOST RECENT bars',
+    tight.ts[tight.ts.length - 1] === s.ts[s.ts.length - 1]);
+  ok('trimmed result fits the ceiling', vEncodeNums_(tight.close, 2).length <= 4000);
+  ok('ts and close stay aligned after trimming', tight.ts.length === tight.close.length);
+  ok('never trims below the 300-bar floor', tight.ts.length >= 300);
+})();
+
+console.log('\n── incremental merge ──');
+(function () {
+  var base = makeSeries(33, 2, 500);
+  var cut = base.ts.length - 30;
+  var oldTs = base.ts.slice(0, cut), oldCl = base.close.slice(0, cut);
+  var newTs = base.ts.slice(cut - 10), newCl = base.close.slice(cut - 10);   // 10 bars overlap
+  var mg = vMergeSeries_(oldTs, oldCl, newTs, newCl);
+  ok('merged length equals the union of days', mg.ts.length === base.ts.length);
+  ok('no duplicate days', new Set(mg.ts.map(function (t) { return Math.floor(t / 86400); })).size === mg.ts.length);
+  ok('strictly ascending', mg.ts.every(function (t, i) { return i === 0 || t > mg.ts[i - 1]; }));
+  ok('reconstructs the original closes', JSON.stringify(mg.close) === JSON.stringify(base.close));
+
+  /* fresh bars must win on overlap — they carry later split adjustment */
+  var adjTs = oldTs.slice(-5), adjCl = oldCl.slice(-5).map(function (v) { return Math.round(v / 2 * 100) / 100; });
+  var m2 = vMergeSeries_(oldTs, oldCl, adjTs, adjCl);
+  ok('fresh bars OVERWRITE stored ones (split adjustment)',
+    m2.close[m2.close.length - 1] === adjCl[adjCl.length - 1]);
+  ok('merging into an empty vault just takes the new series',
+    vMergeSeries_([], [], newTs, newCl).ts.length === newTs.length);
+  ok('merging nothing new is a no-op', vMergeSeries_(oldTs, oldCl, [], []).ts.length === oldTs.length);
+})();
+
+console.log('\n── consumer compatibility ──');
+(function () {
+  /* TierLab's month-end detection must behave identically on vault timestamps */
+  function monthEnds(ts) {
+    var out = [], prevKey = null, lastIdx = -1;
+    for (var i = 0; i < ts.length; i++) {
+      var d = new Date(ts[i] * 1000);
+      var key = d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2);
+      if (prevKey !== null && key !== prevKey) out.push(lastIdx);
+      prevKey = key; lastIdx = i;
+    }
+    return out;
+  }
+  var s = makeSeries(44, 10, 800);
+  var vaultTs = vDecodeDays_(vEncodeDays_(s.ts));
+  var a = monthEnds(s.ts), b = monthEnds(vaultTs);
+  ok('tlMonthEnds_ finds the same bars from the vault', JSON.stringify(a) === JSON.stringify(b));
+  console.log('   (' + a.length + ' month-ends over ~10y)');
+  ok('enough month-ends for the TierLab grid', a.length > 100);
+})();
+
+console.log(fails ? ('\n' + fails + ' FAILURE(S)') : '\nALL PASS');
+process.exit(fails ? 1 : 0);
