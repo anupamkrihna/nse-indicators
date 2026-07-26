@@ -536,9 +536,11 @@ function openDive(sym){
       +(p.hazards.length?'<div class="hzline">⚠ '+p.hazards.map(function(h){return esc(h.msg);}).join(' · ')+'</div>':'')
       +'<div class="verdict">'+verdict+'</div>'
       + sellDiveBlock_(p)
-      + bullDiveBlock_(p);
+      + bullDiveBlock_(p)
+      + '<div id="layersPanel"><div class="mut">three-layer view…</div></div>';
 
     drawDive(p);
+    layersFill_(p);
   }).catch(function(e){ d.innerHTML='<div style="color:#f0655a">✗ '+esc(e.message)+'</div>'; });
 }
 
@@ -641,6 +643,102 @@ function drawDive(p){
     if(q[0]==null)return; s+='<circle cx="'+(W-PR+8)+'" cy="'+Y(q[0]).toFixed(1)+'" r="3.2" fill="'+q[1]+'"/>';
   });
   $('diveSvg').innerHTML=s;
+}
+
+
+/* ══════════════ three-layer view (descriptive · D-005/D-009) ══════════════
+   Market and sector are derived from the radar scan already in memory, so this
+   costs no extra fetch. It states WHERE a stock sits across three scales. It
+   does NOT rank expected return: STRONG tested indistinguishable from the
+   universe average (D-005), and conditioning on market regime proved
+   unanswerable with this much data (D-009). Read it as context, not a signal. */
+function layersCompute_(rows){
+  var ok = (rows||[]).filter(function(r){ return r && r.ok && r.bull; });
+  if(ok.length < 50) return null;
+  var stacked=0, rising=0, exts=[];
+  var bySec={};
+  ok.forEach(function(r){
+    if(r.stack==='bull') stacked++;
+    if(r.bull.on) rising++;
+    var e = (r.bull && r.bull.ext200!=null) ? r.bull.ext200 : null;
+    if(e!=null){
+      exts.push(e);
+      var s = r.sector||'—';
+      (bySec[s]=bySec[s]||[]).push(e);
+    }
+  });
+  function med(a){ if(!a.length) return null; var b=a.slice().sort(function(x,y){return x-y;}); var n=b.length,m=(n-1)/2;
+    return n%2? b[m] : (b[Math.floor(m)]+b[Math.ceil(m)])/2; }
+  var breadth = stacked/ok.length, participation = rising/ok.length;
+  var secs=[];
+  Object.keys(bySec).forEach(function(s){ if(bySec[s].length>=5) secs.push({sector:s,n:bySec[s].length,med:med(bySec[s])}); });
+  secs.sort(function(a,b){ return b.med-a.med; });
+  secs.forEach(function(x,i){ x.rank=i+1; });
+  var label = breadth>=0.50 ? 'broad advance' : breadth>=0.30 ? 'mixed' : 'narrow';
+  return { n:ok.length, breadth:breadth, participation:participation, medExt:med(exts),
+           label:label, sectors:secs, secIndex:(function(){ var m={}; secs.forEach(function(x){ m[x.sector]=x; }); return m; })() };
+}
+
+function layersBar_(frac, tone){
+  var w=Math.max(0,Math.min(100,Math.round(frac*100)));
+  var col = tone==='up' ? '#5ee08a' : tone==='dn' ? '#f0655a' : '#e8b94a';
+  return '<span style="display:inline-block;width:64px;height:5px;background:#1b2740;border-radius:3px;vertical-align:middle">'
+    + '<span style="display:block;width:'+w+'%;height:5px;background:'+col+';border-radius:3px"></span></span>';
+}
+function layersRow_(label, chip, tone, detail, frac){
+  var cc = tone==='up' ? '#5ee08a' : tone==='dn' ? '#f0655a' : '#e8b94a';
+  return '<tr><td style="color:#63769a;font-size:10px;letter-spacing:.05em;padding:3px 10px 3px 0;white-space:nowrap">'+label+'</td>'
+    + '<td style="padding:3px 0"><b style="color:'+cc+'">'+esc(chip)+'</b> <span class="mut">'+detail+'</span></td>'
+    + '<td style="padding:3px 0 3px 10px;text-align:right">'+(frac==null?'':layersBar_(frac,tone))+'</td></tr>';
+}
+
+function layersRender_(p, L){
+  var el=$('layersPanel'); if(!el) return;
+  if(!L){ el.innerHTML='<div class="mut">three-layer view needs the universe scan — open Cross Radar once</div>'; return; }
+  var mTone = L.breadth>=0.50?'up':L.breadth>=0.30?'gd':'dn';
+  var rows = layersRow_('MARKET', L.label, mTone,
+    Math.round(L.breadth*100)+'% of '+L.n+' stacked above their DMAs · '+Math.round(L.participation*100)+'% with all three rising',
+    L.breadth);
+
+  var sec = p.sector||'—', s = L.secIndex[sec];
+  if(s){
+    var total=L.sectors.length, pos=s.rank, tone = pos<=Math.ceil(total/3)?'up':pos<=Math.ceil(total*2/3)?'gd':'dn';
+    var word = tone==='up'?'leading':tone==='gd'?'middling':'lagging';
+    rows += layersRow_('SECTOR', word, tone,
+      esc(sec)+' · rank '+pos+' of '+total+' · median '+(Math.round(s.med*10)/10)+'% over the 200 ('+s.n+' names)',
+      1-(pos-1)/Math.max(1,total-1));
+  } else {
+    rows += layersRow_('SECTOR','—','gd', esc(sec)+' · too few names to rank', null);
+  }
+
+  var b=p.bull, cls=(b&&b.on)?b.cls:'not on the board';
+  var sTone = cls==='STRONG'?'up':cls==='PULLBACK'?'dn':'gd';
+  var det=[];
+  if(b&&b.on&&b.ext200!=null) det.push((b.ext200>=0?'+':'')+b.ext200+'% over the 200');
+  if(p.pct52w!=null) det.push(p.pct52w+'% of the 52w high');
+  if(!(b&&b.on)) det.push('one or more DMAs not rising');
+  rows += layersRow_('STOCK', cls.toLowerCase(), sTone, det.join(' · '), null);
+
+  var agree = (mTone==='up') + (s ? (s.rank<=Math.ceil(L.sectors.length/3)) : 0) + (sTone==='up');
+  var synth = agree===3 ? ['aligned','all three scales point the same way']
+    : agree===0 ? ['none aligned','no scale is favourable']
+    : ['mixed','the scales disagree — see the rows above'];
+
+  el.innerHTML = '<div class="board"><h3>Three-layer view</h3>'
+    + '<table style="width:100%;font-size:12px;border-collapse:collapse">'+rows+'</table>'
+    + '<div style="border-top:1px solid #213150;margin-top:8px;padding-top:6px;font-size:12px">'
+    + '<b>'+synth[0]+'</b> <span class="mut">— '+synth[1]+'.</span></div>'
+    + '<div class="sl-legend" style="margin-top:6px">Describes where the stock sits at three scales, from the same scan the Cross Radar uses. '
+    + '<b>It does not rank expected return.</b> STRONG tested indistinguishable from the universe average on hold rate, mean and median across 65,229 episodes, '
+    + 'and conditioning on market regime proved unanswerable with ten years of data (only ~4 independent regime episodes). Context, not a signal.</div></div>';
+}
+
+function layersFill_(p){
+  if(radarLoaded && RD.length){ layersRender_(p, layersCompute_(RD)); return; }
+  J(API+'?action=radar').then(function(r){
+    if(r && r.ok && r.rows){ RD=r.rows.filter(function(x){return x.ok;}); radarLoaded=true; }
+    layersRender_(p, RD.length? layersCompute_(RD) : null);
+  }).catch(function(){ layersRender_(p, null); });
 }
 
 /* ══════════════ radar ══════════════ */
