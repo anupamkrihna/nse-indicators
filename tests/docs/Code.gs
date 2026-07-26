@@ -518,16 +518,31 @@ function bullPack_(cl, e20, e50, e200, adxRegime, sell, macdObj, rvolV, obvTrend
   if (ext200 >= 30) why.push('extended ' + ext200 + '% over 200');
   if (rsiV != null && rsiV >= 80) why.push('RSI ' + rsiV + ' ≥80');
   if (price < v20) why.push('below 20 DMA — pullback underway');
-  var cls = why.length ? 'CAUTION' : (stacked && trending ? 'STRONG' : 'BULL');
-  var confirms = 0;
-  if (macdObj && macdObj.histExpanding && macdObj.histDir === 'bull') confirms++;
-  if (rvolV != null && rvolV >= 1.5) confirms++;
-  if (obvTrendV === 'rising') confirms++;
-  if (rsiV != null && rsiV >= 40 && rsiV <= 80) confirms++;
-  var grade = cls === 'CAUTION' ? 'C' : (trending && confirms >= 2 ? 'A' : 'B');
+  /* ── v1.7 (26-Jul-2026) — see docs/DECISIONS.md D-005 ──
+     CAUTION is retired. It pooled two opposite populations and a 65,229-episode
+     backfill showed them behaving quite differently over 21 days:
+       ext200>=30 / RSI>=80  → stretched BECAUSE it has been running.
+                               median +1.9% vs STRONG's +1.1%.
+       price < 20 DMA        → already broken down. median +1.0%.
+     Warning about the first while calling both "caution" was backwards, so the
+     buckets are now surfaced separately as EXTENDED and PULLBACK. This is a
+     LABEL change only — the triggers and thresholds are untouched.
+     GRADE is removed (null): grade C was defined AS CAUTION, so it mechanically
+     inherited the best bucket's numbers (A-C mean -1.4% [-2.2,-0.6]); and
+     independently grade A (1.8%) underperformed grade B (2.1%), so the
+     four-indicator confirmation stack does not rank either. Re-fitting grades
+     to that sample would be fitting labels to noise, so none is offered.
+     NOTE: EXTENDED is NOT a buy signal — the median edge is ~0.8pp with an
+     interval touching zero, and survivorship censors exactly the
+     extended->collapsed->delisted path. Presentation only. */
+  var cls;
+  if (price < v20) cls = 'PULLBACK';                               // breakdown takes precedence
+  else if (ext200 >= 30 || (rsiV != null && rsiV >= 80)) cls = 'EXTENDED';
+  else if (rsiDiv) cls = 'WEAKENING';                              // momentum not confirming
+  else cls = (stacked && trending) ? 'STRONG' : 'BULL';
   var pHold = (sell && sell.ok && sell.bootstrap != null) ? Math.round((1 - sell.bootstrap) * 1000) / 1000 : null;
   var pullTail = (sell && sell.ok && sell.tail != null) ? sell.tail : null;
-  return { ok: true, on: true, cls: cls, grade: grade, s20: s20, s50: s50, s200: s200,
+  return { ok: true, on: true, cls: cls, grade: null, s20: s20, s50: s50, s200: s200,
     ext200: ext200, dist50: dist50, stacked: stacked, pHold: pHold, pullTail: pullTail,
     reasons: why };
 }
@@ -599,6 +614,18 @@ function computePack(bars, withSeries) {
     sma200SlopePct: Math.round(sma200SlopePct * 1000) / 1000
   };
 
+  /* 52-week band — reference lines on the dive chart. Computed from the FULL
+     series because CFG.SERIES_WINDOW (220) is shorter than 252 trading days,
+     so the chart payload alone cannot produce a true 52-week high. */
+  var w52 = Math.min(252, n), hi52 = -Infinity, lo52 = Infinity;
+  for (var q52 = n - w52; q52 < n; q52++) {
+    if (cl[q52] > hi52) hi52 = cl[q52];
+    if (cl[q52] < lo52) lo52 = cl[q52];
+  }
+  pack.high52 = Math.round(hi52 * 100) / 100;
+  pack.low52 = Math.round(lo52 * 100) / 100;
+  pack.pct52w = hi52 > 0 ? Math.round(price / hi52 * 1000) / 10 : null;   // % of the 52w high
+
   var hg = hazardsAndGrade(pack);
   pack.hazards = hg.hazards;
   pack.grade = hg.grade;
@@ -617,7 +644,10 @@ function computePack(bars, withSeries) {
       close: tailArr(cl, w), volume: tailArr(vol, w),
       ema20: tailArr(e20, w), ema50: tailArr(e50, w), ema200: tailArr(e200, w),
       sma50: tailArr(s50, w), sma200: tailArr(s200, w),
-      obv: tailArr(ob.obv, w)
+      obv: tailArr(ob.obv, w),
+      /* per-bar ADX so the chart can shade the stretches where its own
+         crossover signals are unreliable (the CHOP hazard, made visible) */
+      adx: tailArr(adxSeries_(hi, lo, cl, 14), w)
     };
   }
   return pack;
@@ -1105,7 +1135,7 @@ function doGet(e) {
   var a = (e.parameter.action || '').toLowerCase();
   var out;
   try {
-    if (a === 'ping') out = { ok: true, v: '1.6', now: new Date().toISOString() };
+    if (a === 'ping') out = { ok: true, v: '1.7', now: new Date().toISOString() };
     else if (a === 'universe') out = { ok: true, universe: uniList_() };
     else if (a === 'ind') out = routeInd_(e);
     else if (a === 'radar') out = routeRadar_();

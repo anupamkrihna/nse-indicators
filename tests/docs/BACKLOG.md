@@ -31,7 +31,7 @@ Universe: **799** names (`var UNIVERSE`, v6). Steam `STOCK_MASTER`: 718.
 - **Roster structure — verified.** `ugAuditUniverse`: DEAD 0 · PROBLEM 0 · CAUTION 30 · OK 769 (799/799 coverage, 65s). Black Sheep v1.4 sweep: 0 BLACKSHEEP. Two independent screens agree.
 - **Sell Watch — calibrated, resolution unproven.** Champion v1, holdout Brier 0.24713 vs raw 0.25482, 15,271 train / 6,546 holdout. Challenger tied the incumbent → correctly kept.
 - **Bull Watch — TESTED, no selection edge.** 65,229 backfilled episodes: `STRONG − ALL BARS` is null on hold, mean AND median. The CAUTION label pooled a momentum bucket with a breakdown bucket; the grade ordering is inverted by construction. Full reasoning in `docs/DECISIONS.md` D-005. Live `runBullLog` continues accruing as the uncensored out-of-sample check.
-- **TierLab — harvest incomplete, two confirmations pending.** Cross-sectional replacement for the flat absolute classifier. Pre-registered hypothesis and analysis plan in D-006.
+- **TierLab — CLOSED, both confirmations failed.** `volMom` +0.57% [−0.26, +1.82], `pct52w` +0.79% [−0.17, +1.66]; both gradients monotone (rho 0.855) but both intervals include zero. Underpowered at 32 holdout months, not negative. Holdout spent. New pre-registration logged in D-006 for a 3-month-horizon test once ≥44 months exist (~12 months away).
 - **Roster watch — baseline seeded.** Every name has a 1-char history; escalation needs 5 weekly cycles.
 
 ## Open items
@@ -40,9 +40,8 @@ Universe: **799** names (`var UNIVERSE`, v6). Steam `STOCK_MASTER`: 718.
 
 - **Deep-history vault (D-007).** Apps Script allows ~20,000 UrlFetch calls/day, shared across BOTH projects by user. BullBackfill and TierLab fetch the identical 10y history for the identical 799 stocks, and every re-run pays again — on 25-Jul that exhausted the quota and took Steam Gauge down with it. Fetch once per stock, store as compact JSON (one row per stock), have all research read from storage, top up weekly. Turns a 184s harvest into seconds and makes re-harvests free. Highest leverage remaining.
 
-### HIGH — finish the tier question
+### HIGH — act on what is settled
 
-- **Run the two declared TierLab confirmations** once quota resets (~12:30 PM IST): `resetTierLab()` → `runTierHarvest()` → `tierConfirm_1_volMom()` → `tierConfirm_2_pct52w()`. Intervals are Bonferroni-widened for exactly two tests; a third would need re-declaring the plan.
 - **Act on D-005 in `bullPack_`:** split the CAUTION label (C_EXTENDED vs C_PULLBACK) and remove the grade. Both are presentation changes; neither alters what is computed. Do NOT invert extension into a buy signal — see D-005 for why.
 
 ### HIGH — validate what's asserted

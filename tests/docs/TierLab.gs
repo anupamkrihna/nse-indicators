@@ -66,6 +66,8 @@
 
 var TLCFG = {
   RANGE:      '10y',
+  USE_VAULT:  true,       // read from Vault.gs when available — TierLab needs only close+ts,
+                          // so a vault hit costs 0 UrlFetch quota (see D-007)
   BUDGET_MS:  200000,     // hard GAS ceiling is 360s; leave room for the final write
   SHEET:      'TierLab',
   RESULT:     'TierLabResults',
@@ -335,23 +337,69 @@ function tlJudge_(ci, rho) {
   return { pass: true, why: 'top-decile median edge CI clear of zero AND gradient monotone (rho ' + rho + ')' };
 }
 
+/* Sheet accessor that survives the GAS stale-reference quirk. After
+   ss.deleteSheet(sh), getSheetByName can still hand back a handle to the dead
+   sheet, and any call on it throws "Sheet <id> not found" (UniverseGate.gs
+   v1.5.1 hit the same thing). Probe the handle before trusting it, and prefer
+   clearing over deleting everywhere in this file. */
+function tlSheet_(name, headers) {
+  var ss = SpreadsheetApp.getActive(), sh = null;
+  try { sh = ss.getSheetByName(name); } catch (e) { sh = null; }
+  if (sh) { try { sh.getLastRow(); } catch (e2) { sh = null; } }      // probe: a stale handle throws here
+  if (!sh) {
+    try { sh = ss.insertSheet(name); }
+    catch (e3) {
+      throw new Error('tlSheet_: cannot create or open the sheet "' + name + '". The spreadsheet ' +
+        'holds a dangling reference (' + e3.message + '). FIX BY HAND: open the spreadsheet, delete ' +
+        'any "' + name + '" tab, check Data > Named ranges for one pointing at a missing sheet, ' +
+        'reload the page, then run tlSheets_() to confirm before retrying.');
+    }
+  }
+  if (headers && sh.getLastRow() === 0) sh.appendRow(headers);
+  return sh;
+}
+
+/* Diagnostic: what sheets does this spreadsheet actually have, and are they
+   all readable? A tab that throws on getLastRow() is the dangling reference. */
+function tlSheets_() {
+  var ss = SpreadsheetApp.getActive();
+  Logger.log('spreadsheet: ' + ss.getName());
+  ss.getSheets().forEach(function (s) {
+    try { Logger.log('  OK       ' + s.getName() + '  (id ' + s.getSheetId() + ', rows ' + s.getLastRow() + ')'); }
+    catch (e) { Logger.log('  BROKEN   <unreadable> — ' + e.message); }
+  });
+  try {
+    var nr = ss.getNamedRanges();
+    Logger.log('named ranges: ' + nr.length);
+    nr.forEach(function (r) {
+      try { Logger.log('  OK       ' + r.getName() + ' → ' + r.getRange().getSheet().getName()); }
+      catch (e) { Logger.log('  BROKEN   ' + r.getName() + ' — points at a missing sheet: ' + e.message); }
+    });
+  } catch (e) { Logger.log('named ranges: unreadable — ' + e.message); }
+}
+
 /* ══════════════ GAS: harvest (month-end aligned, resumable) ══════════════ */
 function runTierHarvest() {
   var t0 = Date.now(), props = PropertiesService.getScriptProperties();
   var uni = uniList_(), start = parseInt(props.getProperty('tl_idx') || '0', 10);
-  var sh = sheet_(TLCFG.SHEET, ['sym', 'ym', 'pct52w', 'mom12_1', 'ext200', 'volMom', 'upFrac', 'fwd1m', 'fwd3m']);
+  var sh = tlSheet_(TLCFG.SHEET, ['sym', 'ym', 'pct52w', 'mom12_1', 'ext200', 'volMom', 'upFrac', 'fwd1m', 'fwd3m']);
   if (sh.getLastRow() >= 1) {
     var h = sh.getRange(1, 1, 1, 9).getValues()[0];
     if (String(h[2]) !== 'pct52w') { Logger.log('runTierHarvest: ABORT — sheet schema mismatch; run resetTierLab() first'); return; }
   }
   var batch = [], done = start, logged = 0, skipped = 0;
-  var failFetch = 0, failShort = 0, failOther = 0, consecFail = 0;
+  var failFetch = 0, failShort = 0, failOther = 0, consecFail = 0, fromVault = 0, fromWeb = 0;
   Logger.log('tierHarvest: resuming at ' + start + '/' + uni.length + ' · sheet has ' + Math.max(sh.getLastRow() - 1, 0) + ' rows');
   for (var s = start; s < uni.length; s++) {
     if (Date.now() - t0 > TLCFG.BUDGET_MS) break;
     done = s + 1;
     try {
-      var u = uni[s], bars = getBarsDeep_(u.sym, TLCFG.RANGE);
+      var u = uni[s], bars = null;
+      if (TLCFG.USE_VAULT && typeof vaultCloseSeries_ === 'function') {
+        bars = vaultCloseSeries_(u.sym);                 // close+ts only — all this harvest needs
+        if (bars) fromVault++;
+      }
+      if (!bars) { bars = getBarsDeep_(u.sym, TLCFG.RANGE); if (bars) fromWeb++; }
       if (!bars || !bars.close) { skipped++; failFetch++; consecFail++; }
       else if (bars.close.length < TLCFG.MIN_BARS) { skipped++; failShort++; consecFail = 0; }
       if (!bars || !bars.close || bars.close.length < TLCFG.MIN_BARS) {
@@ -414,6 +462,7 @@ function runTierHarvest() {
   props.setProperty('tl_idx', fin ? '0' : String(done));
   Logger.log('tierHarvest: ' + start + '→' + done + '/' + uni.length + ', ' + logged + ' rows, ' +
     skipped + ' skipped (fetch-failed ' + failFetch + ', too-short ' + failShort + ', errored ' + failOther + '), ' +
+    'vault ' + fromVault + '/web ' + fromWeb + ', ' +
     Math.round((Date.now() - t0) / 1000) + 's. ' +
     (fin ? 'DONE — now run tierExplore().' : 'Not finished — run runTierHarvest() again.'));
 }
@@ -421,8 +470,10 @@ function runTierHarvest() {
 function resetTierLab() {
   var ss = SpreadsheetApp.getActive();
   [TLCFG.SHEET, TLCFG.RESULT].forEach(function (n) {
-    var sh = ss.getSheetByName(n); if (sh) { try { ss.deleteSheet(sh); } catch (e) { sh.clear(); } }
+    var sh = ss.getSheetByName(n);
+    if (sh) { try { sh.clear(); } catch (e) { /* already gone */ } }   // clear, never delete — see tlSheet_
   });
+  try { SpreadsheetApp.flush(); } catch (e) { /* a dangling sheet ref can make flush throw */ }
   var p = PropertiesService.getScriptProperties();
   p.deleteProperty('tl_idx'); p.deleteProperty('TL_CONFIRMED');
   Logger.log('TierLab cleared — including the holdout usage log');
@@ -515,7 +566,7 @@ function tierExplore() {
   Logger.log('NOTE: these are TRAINING numbers. Choose ONE factor, then run');
   Logger.log("      tierConfirm('<factor>') exactly once. Every factor you confirm");
   Logger.log('      spends holdout credibility — that is the point of the split.');
-  sheet_(TLCFG.RESULT, ['at', 'phase', 'result']).appendRow([new Date().toISOString(), 'explore', JSON.stringify(summary)]);
+  tlSheet_(TLCFG.RESULT, ['at', 'phase', 'result']).appendRow([new Date().toISOString(), 'explore', JSON.stringify(summary)]);
   return summary;
 }
 
@@ -564,7 +615,7 @@ function tierConfirm(factor) {
 
   used.push(factor);
   props.setProperty('TL_CONFIRMED', JSON.stringify(used));
-  sheet_(TLCFG.RESULT, ['at', 'phase', 'result']).appendRow([new Date().toISOString(), 'confirm:' + factor,
+  tlSheet_(TLCFG.RESULT, ['at', 'phase', 'result']).appendRow([new Date().toISOString(), 'confirm:' + factor,
     JSON.stringify({ factor: factor, n: res.n, rho: res.rho, ci: ci, judge: judge, table: res.table })]);
   return { factor: factor, rho: res.rho, ci: ci, judge: judge };
 }

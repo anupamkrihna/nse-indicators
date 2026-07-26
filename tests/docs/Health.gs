@@ -58,7 +58,10 @@ var HCFG = {
 /* per-class hold-rate & mean forward-return table for Bull Watch health.
    rows: [{cls, held(0|1), fwd(number)}] → {STRONG,BULL,CAUTION:{n,holdRate,meanFwd}} */
 function bullClassTable_(rows) {
-  var C = { STRONG: [], BULL: [], CAUTION: [] };
+  /* v1.1 (26-Jul-2026): CAUTION was retired in bullPack_ and split into
+     EXTENDED / WEAKENING / PULLBACK — see docs/DECISIONS.md D-005. CAUTION is
+     still bucketed so that rows logged before the change remain readable. */
+  var C = { STRONG: [], BULL: [], EXTENDED: [], WEAKENING: [], PULLBACK: [], CAUTION: [] };
   (rows || []).forEach(function (r) { if (C[r.cls]) C[r.cls].push(r); });
   function agg(a) {
     if (!a.length) return { n: 0, holdRate: null, meanFwd: null };
@@ -66,7 +69,9 @@ function bullClassTable_(rows) {
     for (var i = 0; i < a.length; i++) { h += a[i].held; f += a[i].fwd; }
     return { n: a.length, holdRate: Math.round(h / a.length * 1000) / 1000, meanFwd: Math.round(f / a.length * 10000) / 10000 };
   }
-  return { STRONG: agg(C.STRONG), BULL: agg(C.BULL), CAUTION: agg(C.CAUTION) };
+  var out = {};
+  Object.keys(C).forEach(function (k) { out[k] = agg(C[k]); });
+  return out;
 }
 
 /* week-over-week black-sheep drift.

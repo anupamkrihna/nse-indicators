@@ -275,7 +275,56 @@ and corroborates D-005 independently — dividing by volatility is precisely wha
 strips out the tail-driven component that made raw extension look better than
 it was.
 
-**Status:** harvest incomplete (quota, see D-007); both confirmations pending.
+### OUTCOME — both confirmations FAILED the criterion (26-Jul-2026)
+
+Holdout: 22,464 rows, 32 months from 2023-10. Harvest verified deterministic
+(64,077 rows / 48 too-short, identical to the first clean run).
+
+| factor | top − universe median | 97.5% CI (Bonferroni, 2 tests) | rho | verdict |
+|---|---|---|---|---|
+| volMom | +0.57% | [−0.26%, +1.82%] | 0.855 | FAIL |
+| pct52w | **+0.79%** | [−0.17%, +1.66%] | 0.855 | FAIL |
+
+*(Both rho values are genuinely 0.855 — verified by hand, Σd² = 24 in each
+table, 1 − 144/990 = 0.8545. Coincidence, not a bug.)*
+
+**What failed was precision, not the gradient.** Both cleared the monotonicity
+floor comfortably (0.855 vs 0.60) and both point estimates are positive. They
+failed only because the intervals include zero. Bonferroni is not the culprit:
+widening 95% → 97.5% adds roughly 15% to the half-width, and at 95% single-test
+`pct52w` would give approximately [−0.01%, +1.59%] — still touching zero,
+marginally. It fails either way.
+
+**Two observations that survive the failure:**
+
+1. **`pct52w` IMPROVED out of sample** — +0.11% in training to +0.79% in the
+   holdout, overtaking `volMom`. That is the opposite of the overfitting
+   signature; a noise-fitted factor degrades. Could be regime rather than
+   substance, but it is not what a spurious result usually looks like.
+2. **The decile-10 anomaly did not replicate.** In training, decile 10 fell back
+   (0.88% vs decile 9's 1.26%), prompting a "mild reversal at new highs"
+   reading. In the holdout the top is monotone: 1.31%, 1.32%. That inference
+   was training noise and is withdrawn.
+
+**Explicitly NOT used to rescue the result:** the 3-month secondary looked
+strong for `pct52w` (top 2.94% vs universe 1.33%, rho 0.903), and top-vs-bottom
+has more power. Both were excluded from the criterion in advance; reaching for
+them now is precisely the post-hoc move this design exists to prevent.
+
+### NEW PRE-REGISTRATION, for a future test on data that does not yet exist
+
+**Hypothesis:** `pct52w`, 3-month horizon. Top decile's median 3-month forward
+return exceeds the universe median, CI clear of zero, rho ≥ 0.60.
+**Rationale:** the 1-month test was underpowered, not negative, and the 3-month
+secondary was directionally strong. A longer horizon carries more signal per
+observation if the effect is a genuine momentum persistence.
+**Condition:** may only be tested once the holdout contains ≥ 44 months. At 32
+months the half-width was ~0.92pp against a 0.79pp point estimate; since the
+interval narrows roughly as 1/√K, resolving an effect of that size needs about
+K × (0.92/0.79)² ≈ 43–44 date clusters. **That is ~12 more months of data.**
+Re-testing before then is re-rolling the same dice.
+
+**Status:** closed. Holdout spent. No tier ships on this evidence.
 
 ### Bugs found and fixed in this file
 

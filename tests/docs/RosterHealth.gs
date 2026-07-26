@@ -461,8 +461,10 @@ function rhShowState() {
 function rhResetRosterHealth() {
   var ss = SpreadsheetApp.getActive();
   [RHCFG.RH_SHEET, RHCFG.SWAP_SHEET].forEach(function (n) {
-    var sh = ss.getSheetByName(n); if (sh) { try { ss.deleteSheet(sh); } catch (e) { sh.clear(); } }
+    var sh = ss.getSheetByName(n);
+    if (sh) { try { sh.clear(); } catch (e) { /* already gone */ } }   // clear, never delete (stale-handle quirk)
   });
+  SpreadsheetApp.flush();
   PropertiesService.getScriptProperties().deleteProperty('RH_PHASE');
   rhUnchain_();
   Logger.log('roster health history cleared — next ugHealthWatch() starts a fresh baseline');
